@@ -1,6 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { readStoredFile } from "@/lib/server/store";
+import {
+  buildMaterialFileUrl,
+  MATERIAL_STORAGE_BUCKET,
+  parseMaterialFileUrl,
+} from "@/lib/storage/shared";
 
 type LegacyRow = Record<string, any>;
 
@@ -45,6 +51,10 @@ function parseSyllabus(value: unknown) {
   }
 
   return [];
+}
+
+function sanitizeStorageSegment(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
 }
 
 export async function maybeMigrateLegacyWorkspace(params: {
@@ -214,4 +224,82 @@ export async function maybeMigrateLegacyWorkspace(params: {
     created_at: row.created_at ?? undefined,
     updated_at: row.updated_at ?? undefined,
   }));
+}
+
+type MaterialMigrationRow = {
+  id: number;
+  user_id: string;
+  course_id: number;
+  week_id: number | null;
+  week_index: number;
+  file_type: "pdf" | "audio" | "infographic";
+  file_name: string;
+  file_url: string;
+  mime_type: string | null;
+  storage_provider: "local" | "supabase" | "google_drive" | "koofr" | null;
+  storage_file_id: string | null;
+};
+
+export async function maybeMigrateLegacyMaterialsToSupabase(params: {
+  supabase: SupabaseClient;
+  user: { id: string };
+}) {
+  const { data: materials, error } = await params.supabase
+    .from("materials")
+    .select(
+      "id,user_id,course_id,week_id,week_index,file_type,file_name,file_url,mime_type,storage_provider,storage_file_id",
+    )
+    .eq("user_id", params.user.id)
+    .eq("storage_provider", "local");
+
+  if (error || !materials || materials.length === 0) {
+    return;
+  }
+
+  for (const material of materials as MaterialMigrationRow[]) {
+    const location = parseMaterialFileUrl(material.file_url);
+    if (!location) {
+      continue;
+    }
+
+    try {
+      const existingFile = await readStoredFile({
+        bucket: location.bucket,
+        filePath: location.filePath,
+        provider: "local",
+        contentType: material.mime_type,
+      });
+
+      const targetPath = [
+        params.user.id,
+        String(material.course_id),
+        String(material.week_id ?? `week-${material.week_index}`),
+        material.file_type,
+        `${material.id}-${sanitizeStorageSegment(material.file_name)}`,
+      ].join("/");
+
+      const { error: uploadError } = await params.supabase.storage
+        .from(MATERIAL_STORAGE_BUCKET)
+        .upload(targetPath, existingFile.buffer, {
+          upsert: true,
+          contentType: material.mime_type || existingFile.contentType,
+        });
+
+      if (uploadError) {
+        continue;
+      }
+
+      await params.supabase
+        .from("materials")
+        .update({
+          file_url: buildMaterialFileUrl(MATERIAL_STORAGE_BUCKET, targetPath),
+          mime_type: material.mime_type || existingFile.contentType,
+          storage_provider: "supabase",
+          storage_file_id: targetPath,
+        })
+        .eq("id", material.id);
+    } catch {
+      // Leave the legacy record in place if a file cannot be migrated.
+    }
+  }
 }

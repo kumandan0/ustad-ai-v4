@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { AuthError, requireUser } from "@/lib/server/auth";
 import { queryTable } from "@/lib/server/store";
 import { deleteStoredFile, readStoredFile, storeUploadedFile } from "@/lib/server/store";
+import {
+  MATERIAL_STORAGE_BUCKET,
+  parseMaterialFileUrl,
+  type StorageProvider,
+} from "@/lib/storage/shared";
 
 export const runtime = "nodejs";
 
@@ -25,23 +30,16 @@ function parseRangeHeader(rangeHeader: string | null, size: number) {
   return { start, end };
 }
 
-function parseMaterialLocation(fileUrl: string) {
-  try {
-    const parsed = new URL(fileUrl, "http://local");
-    const bucket = parsed.searchParams.get("bucket");
-    const filePath = parsed.searchParams.get("path");
+type MaterialAccessRow = {
+  id: number;
+  course_id: number;
+  file_url: string;
+  storage_provider: StorageProvider | null;
+  storage_file_id: string | null;
+  mime_type: string | null;
+};
 
-    if (parsed.pathname !== "/api/files" || !bucket || !filePath) {
-      return null;
-    }
-
-    return { bucket, filePath };
-  } catch {
-    return null;
-  }
-}
-
-async function ensureUserCanAccessFile(
+async function findAuthorizedMaterialForFile(
   client: Parameters<typeof queryTable>[0]["client"],
   bucket: string,
   filePath: string,
@@ -50,16 +48,22 @@ async function ensureUserCanAccessFile(
     action: "select",
     table: "materials",
     client,
-  })) as Array<Record<string, any>>;
+  })) as MaterialAccessRow[];
 
   const matchedMaterial = materials.find((material) => {
-    const location = parseMaterialLocation(String(material.file_url ?? ""));
+    if (material.storage_provider === "supabase" && material.storage_file_id) {
+      return bucket === MATERIAL_STORAGE_BUCKET && material.storage_file_id === filePath;
+    }
+
+    const location = parseMaterialFileUrl(String(material.file_url ?? ""));
     return location?.bucket === bucket && location.filePath === filePath;
   });
 
   if (!matchedMaterial) {
     throw new AuthError("Bu dosyaya erişim izniniz yok.", 403);
   }
+
+  return matchedMaterial;
 }
 
 function inferCourseIdFromFilePath(filePath: string) {
@@ -97,11 +101,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Eksik dosya bilgisi." }, { status: 400 });
     }
 
-    await ensureUserCanAccessFile(auth.supabase, bucket, filePath);
-    const file = await readStoredFile(bucket, filePath);
+    const material = await findAuthorizedMaterialForFile(auth.supabase, bucket, filePath);
+    const file = await readStoredFile({
+      client: auth.supabase,
+      bucket,
+      filePath,
+      provider: material.storage_provider,
+      contentType: material.mime_type,
+    });
     const size = file.buffer.length;
     const range = parseRangeHeader(request.headers.get("range"), size);
-    const contentType = type || file.contentType;
+    const contentType = type || material.mime_type || file.contentType;
 
     if (range) {
       const chunk = file.buffer.subarray(range.start, range.end + 1);
@@ -153,6 +163,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Eksik yukleme bilgisi." }, { status: 400 });
     }
 
+    if (bucket !== MATERIAL_STORAGE_BUCKET) {
+      return NextResponse.json({ error: "Geçersiz dosya deposu." }, { status: 400 });
+    }
+
     const courseId = explicitCourseId > 0
       ? explicitCourseId
       : inferCourseIdFromFilePath(filePath);
@@ -162,7 +176,13 @@ export async function POST(request: NextRequest) {
     }
 
     await ensureUserCanAccessCourse(auth.supabase, courseId);
-    const data = await storeUploadedFile(bucket, filePath, file);
+    const data = await storeUploadedFile({
+      client: auth.supabase,
+      bucket,
+      filePath,
+      file,
+      provider: "supabase",
+    });
     const response = NextResponse.json({ data });
     return auth.applyCookies(response);
   } catch (error) {
@@ -186,8 +206,13 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: "Eksik dosya bilgisi." }, { status: 400 });
     }
 
-    await ensureUserCanAccessFile(auth.supabase, bucket, filePath);
-    await deleteStoredFile(bucket, filePath);
+    const material = await findAuthorizedMaterialForFile(auth.supabase, bucket, filePath);
+    await deleteStoredFile({
+      client: auth.supabase,
+      bucket,
+      filePath,
+      provider: material.storage_provider,
+    });
     const response = NextResponse.json({ ok: true });
     return auth.applyCookies(response);
   } catch (error) {

@@ -10,7 +10,7 @@
       <string>/bin/zsh</string>
       <string>-l</string>
       <string>-c</string>
-      <string>cd "/Users/ihu/Documents/New project" &amp;&amp; if [ ! -f ".next/BUILD_ID" ]; then /usr/local/bin/npm run build; fi &amp;&amp; exec /usr/local/bin/npm run start -- --hostname 127.0.0.1 --port 3003</string>
+      <string>cd "/Users/ihu/Documents/New project" &amp;&amp; if [ ! -f ".next/BUILD_ID" ]; then /usr/local/bin/npm run build; fi &amp;&amp; exec /usr/local/bin/npm run start -- --hostname :: --port 3003</string>
     </array>
 
     <key>WorkingDirectory</key>

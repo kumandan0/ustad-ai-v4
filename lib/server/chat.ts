@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { queryTable, readStoredFile, type QueryScope } from "@/lib/server/store";
+import { parseMaterialFileUrl, type StorageProvider } from "@/lib/storage/shared";
 
 type ChatMode = "general" | "materials";
 
@@ -28,6 +29,9 @@ type MaterialRow = {
   file_type: "pdf" | "audio" | "infographic";
   file_name: string;
   file_url: string;
+  mime_type?: string | null;
+  storage_provider?: StorageProvider | null;
+  storage_file_id?: string | null;
 };
 
 type MaterialSelection = MaterialRow & {
@@ -107,22 +111,6 @@ function scoreMaterial(question: string, weekTitle: string, fileName: string, we
   }
 
   return score;
-}
-
-function parseStoredMaterialUrl(fileUrl: string) {
-  try {
-    const parsed = new URL(fileUrl, "http://local");
-    const bucket = parsed.searchParams.get("bucket");
-    const filePath = parsed.searchParams.get("path");
-
-    if (parsed.pathname !== "/api/files" || !bucket || !filePath) {
-      return null;
-    }
-
-    return { bucket, filePath };
-  } catch {
-    return null;
-  }
 }
 
 function mapMessagesToGeminiContents(messages: Message[]) {
@@ -329,19 +317,26 @@ async function uploadGeminiFile(
 async function uploadSelectedMaterials(
   apiKey: string,
   materials: MaterialSelection[],
+  client: SupabaseClient,
 ) {
   const uploadedFiles: UploadedGeminiFile[] = [];
   const skippedNotes: string[] = [];
 
   for (const material of materials) {
-    const location = parseStoredMaterialUrl(material.file_url);
+    const location = parseMaterialFileUrl(material.file_url);
     if (!location) {
       skippedNotes.push(`${material.file_name}: dosya konumu cozumlenemedi.`);
       continue;
     }
 
     try {
-      const storedFile = await readStoredFile(location.bucket, location.filePath);
+      const storedFile = await readStoredFile({
+        client,
+        bucket: location.bucket,
+        filePath: material.storage_file_id || location.filePath,
+        provider: material.storage_provider,
+        contentType: material.mime_type,
+      });
       const upload = await uploadGeminiFile(
         apiKey,
         material.file_name,
@@ -532,6 +527,7 @@ export async function createChatReply(params: {
     const { uploadedFiles, skippedNotes } = await uploadSelectedMaterials(
       apiKey,
       scoped.selectedMaterials,
+      params.client,
     );
 
     if (uploadedFiles.length === 0) {

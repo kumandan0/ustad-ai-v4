@@ -40,10 +40,12 @@ import {
   Shield,
   Users,
   LogOut,
+  Sparkles,
 } from "lucide-react";
 import {
   createClient,
   deleteStoredFileUrl,
+  MATERIAL_STORAGE_BUCKET,
   resolveStoredFileUrl,
 } from "@/lib/supabase/client";
 
@@ -91,15 +93,25 @@ interface OpenEndedQuestion {
 interface Material {
   id: number;
   course_id: number;
+  week_id?: number | null;
   week_index: number;
   file_type: "pdf" | "audio" | "infographic";
   file_name: string;
   file_url: string;
+  mime_type?: string | null;
+  storage_provider?: "local" | "supabase" | "google_drive" | "koofr" | null;
+  storage_file_id?: string | null;
 }
 
 type MaterialFileType = Material["file_type"];
 type WeekMaterials = Partial<Record<MaterialFileType, Material>>;
 type ChatMode = "general" | "materials";
+type AutomationKind =
+  | "audio_summary"
+  | "infographic"
+  | "flashcards"
+  | "test_questions"
+  | "open_ended_questions";
 
 interface LearningGoal {
   id: number;
@@ -166,6 +178,9 @@ const ACTIVE_COURSE_STORAGE_KEY = "ustad-ai-active-course-id";
 
 const buildCourseSyllabus = (weeks: number) =>
   Array.from({ length: weeks }, (_, index) => `Hafta ${index + 1} Konusu`);
+
+const sanitizeStorageSegment = (value: string) =>
+  value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
 
 const buildWeeksPayload = (courseId: number, syllabus: string[]) =>
   syllabus.map((title, index) => ({
@@ -276,6 +291,7 @@ export default function UstadAI() {
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [showInviteCode, setShowInviteCode] = useState(false);
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "", inviteCode: "" });
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [adminInvites, setAdminInvites] = useState<AdminInviteSummary[]>([]);
@@ -363,6 +379,7 @@ export default function UstadAI() {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
   const [input, setInput] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("general");
+  const [automationLoading, setAutomationLoading] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
   const [stats, setStats] = useState({ messages: 0 });
@@ -394,16 +411,41 @@ export default function UstadAI() {
     setAdminModalOpen(false);
     setResetPasswordUser(null);
     setPasswordModalOpen(false);
+    setAutomationLoading({});
   }, []);
+
+  const buildAutomationKey = useCallback(
+    (kind: AutomationKind, weekIndex: number) => `${kind}:${weekIndex}`,
+    [],
+  );
+
+  const fetchJsonWithTimeout = useCallback(
+    async <T,>(input: RequestInfo | URL, init?: RequestInit, timeoutMs = 8000): Promise<T> => {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch(input, {
+          cache: "no-store",
+          ...init,
+          signal: controller.signal,
+        });
+
+        return (await response.json().catch(() => ({}))) as T;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    },
+    [],
+  );
 
   const fetchSession = useCallback(async () => {
     setAuthLoading(true);
 
     try {
-      const response = await fetch("/api/auth/session");
-      const payload = (await response.json().catch(() => ({}))) as {
+      const payload = await fetchJsonWithTimeout<{
         user?: SessionUser | null;
-      };
+      }>("/api/auth/session");
 
       setSessionUser(payload.user ?? null);
     } catch {
@@ -411,7 +453,7 @@ export default function UstadAI() {
     } finally {
       setAuthLoading(false);
     }
-  }, []);
+  }, [fetchJsonWithTimeout]);
 
   const handleAuthSubmit = useCallback(async () => {
     const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
@@ -438,6 +480,7 @@ export default function UstadAI() {
       resetWorkspaceState();
       setSessionUser(payload.user);
       setAuthForm({ name: "", email: "", password: "", inviteCode: "" });
+      setShowInviteCode(false);
       setAuthMode("login");
       setActiveTab("curriculum");
       setChatMode("general");
@@ -459,6 +502,7 @@ export default function UstadAI() {
     setSessionUser(null);
     setAuthMode("login");
     setAuthForm({ name: "", email: "", password: "", inviteCode: "" });
+    setShowInviteCode(false);
     setAuthError("");
     setDataLoading(false);
   }, [resetWorkspaceState]);
@@ -1020,6 +1064,15 @@ export default function UstadAI() {
     const loadInitialCourses = async () => {
       if (!cancelled) {
         setDataLoading(true);
+        try {
+          await fetchJsonWithTimeout<{ user?: SessionUser | null }>(
+            "/api/auth/bootstrap",
+            { method: "POST" },
+            15000,
+          );
+        } catch (error) {
+          console.error(error);
+        }
         await loadCourses();
       }
     };
@@ -1409,7 +1462,7 @@ const handleFileUpload = async (
     fileType: MaterialFileType,
     event: ChangeEvent<HTMLInputElement>,
   ) => {
-    if (!activeCourseId) {
+    if (!activeCourseId || !sessionUser) {
       return;
     }
 
@@ -1418,47 +1471,53 @@ const handleFileUpload = async (
       return;
     }
 
-    const fileExt = file.name.split(".").pop();
-    const fileName = `${activeCourseId}_${weekIndex}_${fileType}_${Date.now()}.${fileExt}`;
-    const filePath = `materials/${fileName}`;
+    const selectedWeek = weeks.find((week) => week.week_index === weekIndex);
+    if (!selectedWeek) {
+      alert("Bu hafta bilgisi henüz yüklenmedi. Lütfen sayfayı yenileyip tekrar deneyin.");
+      event.target.value = "";
+      return;
+    }
+
+    const safeFileName = sanitizeStorageSegment(file.name);
+    const filePath = [
+      sessionUser.id,
+      String(activeCourseId),
+      String(selectedWeek.id),
+      fileType,
+      `${Date.now()}-${safeFileName}`,
+    ].join("/");
     const existingMaterial = materials[weekIndex]?.[fileType];
 
     try {
-      // 1. Dosyayı Supabase'e yükle (upsert: true ile aynı isimde dosya varsa üzerine yazar)
       const { data: uploadData, error: uploadError } = await supabase.storage
-        .from("law-tutor-files")
+        .from(MATERIAL_STORAGE_BUCKET)
         .upload(filePath, file, { courseId: activeCourseId });
 
       if (uploadError || !uploadData) {
         throw uploadError ?? new Error("Dosya Supabase'e yüklenemedi.");
       }
 
-      // 2. Yüklenen dosyanın herkese açık (Public) URL'sini Supabase'den talep et!
-      const { data: urlData } = supabase.storage
-        .from("law-tutor-files")
-        .getPublicUrl(filePath);
-
-      const resolvedUrl = await resolveStoredFileUrl(urlData.publicUrl);
-
-      // 3. Veritabanına (materials tablosuna) kaydet
       const { data, error } = await supabase
         .from("materials")
         .insert({
           course_id: activeCourseId,
+          week_id: selectedWeek.id,
           week_index: weekIndex,
           file_type: fileType,
           file_name: file.name,
-          file_url: resolvedUrl,
+          file_url: uploadData.publicUrl,
+          mime_type: uploadData.contentType || file.type || null,
+          storage_provider: "supabase",
+          storage_file_id: uploadData.path,
         })
         .select()
         .single();
 
       if (error || !data) {
-        await deleteStoredFileUrl(resolvedUrl);
+        await deleteStoredFileUrl(uploadData.publicUrl);
         throw error ?? new Error("Dosya veritabanına kaydedilemedi.");
       }
 
-      // 4. Eğer eski dosya varsa onu sil (Eskiyi temizle)
       if (existingMaterial?.file_url) {
         await deleteStoredFileUrl(existingMaterial.file_url);
         await supabase.from("materials").delete().eq("id", existingMaterial.id);
@@ -1694,6 +1753,140 @@ const handleFileUpload = async (
     event.target.value = "";
   };
 
+  const runAutomation = useCallback(
+    async (kind: AutomationKind, weekIndex: number) => {
+      if (!activeCourseId) {
+        return;
+      }
+
+      const requestKey = buildAutomationKey(kind, weekIndex);
+      setAutomationLoading((prev) => ({ ...prev, [requestKey]: true }));
+
+      try {
+        const response = await fetch("/api/automation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind,
+            courseId: activeCourseId,
+            weekIndex,
+          }),
+        });
+
+        const payload = (await response.json().catch(() => ({}))) as {
+          data?: {
+            kind?: AutomationKind;
+            material?: Material;
+            replacedExisting?: boolean;
+            items?: Array<Flashcard | TestQuestion | OpenEndedQuestion>;
+            skippedDuplicates?: number;
+          };
+          error?: string;
+        };
+
+        if (!response.ok || !payload.data?.kind) {
+          throw new Error(payload.error || "AI üretimi tamamlanamadı.");
+        }
+
+        if (payload.data.kind === "audio_summary" || payload.data.kind === "infographic") {
+          const material = payload.data.material;
+          if (!material) {
+            throw new Error("Üretilen materyal alınamadı.");
+          }
+
+          const resolvedUrl = await resolveStoredFileUrl(String(material.file_url ?? ""));
+          setMaterials((prev) => ({
+            ...prev,
+            [weekIndex]: {
+              ...prev[weekIndex],
+              [material.file_type]: {
+                ...material,
+                file_url: resolvedUrl || String(material.file_url ?? ""),
+              },
+            },
+          }));
+
+          const label =
+            payload.data.kind === "audio_summary" ? "sesli özet" : "infografik";
+          alert(
+            payload.data.replacedExisting
+              ? `AI ${label} üretildi ve mevcut ${label} materyalinin yerine kaydedildi.`
+              : `AI ${label} hazır.`,
+          );
+          return;
+        }
+
+        if (payload.data.kind === "flashcards") {
+          const items = (payload.data.items as Flashcard[] | undefined) ?? [];
+          if (items.length > 0) {
+            setFlashcards((prev) => ({
+              ...prev,
+              [weekIndex]: [...(prev[weekIndex] || []), ...items],
+            }));
+          }
+
+          const skipped = Number(payload.data.skippedDuplicates ?? 0);
+          alert(
+            items.length > 0
+              ? `${items.length} bilgi kartı üretildi${skipped > 0 ? `, ${skipped} benzer kart atlandı` : ""}.`
+              : "Yeni bilgi kartı üretilemedi; benzer kartlar zaten mevcut olabilir.",
+          );
+          return;
+        }
+
+        if (payload.data.kind === "test_questions") {
+          const items = ((payload.data.items as TestQuestion[] | undefined) ?? []).map(
+            (item) => ({
+              ...item,
+              options: item.options as string[],
+            }),
+          );
+
+          if (items.length > 0) {
+            setTestQuestions((prev) => ({
+              ...prev,
+              [weekIndex]: [...(prev[weekIndex] || []), ...items],
+            }));
+          }
+
+          const skipped = Number(payload.data.skippedDuplicates ?? 0);
+          alert(
+            items.length > 0
+              ? `${items.length} test sorusu üretildi${skipped > 0 ? `, ${skipped} benzer soru atlandı` : ""}.`
+              : "Yeni test sorusu üretilemedi; benzer sorular zaten mevcut olabilir.",
+          );
+          return;
+        }
+
+        if (payload.data.kind === "open_ended_questions") {
+          const items = (payload.data.items as OpenEndedQuestion[] | undefined) ?? [];
+          if (items.length > 0) {
+            setOpenEndedQuestions((prev) => ({
+              ...prev,
+              [weekIndex]: [...(prev[weekIndex] || []), ...items],
+            }));
+          }
+
+          const skipped = Number(payload.data.skippedDuplicates ?? 0);
+          alert(
+            items.length > 0
+              ? `${items.length} açık uçlu soru üretildi${skipped > 0 ? `, ${skipped} benzer soru atlandı` : ""}.`
+              : "Yeni açık uçlu soru üretilemedi; benzer sorular zaten mevcut olabilir.",
+          );
+        }
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "AI üretimi tamamlanamadı.");
+      } finally {
+        setAutomationLoading((prev) => {
+          const next = { ...prev };
+          delete next[requestKey];
+          return next;
+        });
+      }
+    },
+    [activeCourseId, buildAutomationKey],
+  );
+
   const sendMessage = async () => {
     if (!input.trim() || loading) {
       return;
@@ -1903,6 +2096,7 @@ const handleFileUpload = async (
                   onClick={() => {
                     setAuthMode(mode);
                     setAuthError("");
+                    setShowInviteCode(false);
                   }}
                   style={{
                     flex: 1,
@@ -1926,7 +2120,7 @@ const handleFileUpload = async (
             </h2>
             <p style={{ color: "#6b7280", fontSize: 14, lineHeight: 1.6, margin: "0 0 20px" }}>
               {authMode === "register"
-                ? "İlk kayıt olan kullanıcı otomatik olarak admin yapılır. Sonraki öğrenciler davet kodu ile kayıt olabilir."
+                ? "İlk kayıt olan kullanıcı otomatik olarak admin yapılır. Yeni kullanıcılar e-posta ile doğrudan kayıt olabilir; davet kodu varsa isteğe bağlı eklenebilir."
                 : "Kendi ders alanına ulaşmak için giriş yap."}
             </p>
 
@@ -1948,21 +2142,42 @@ const handleFileUpload = async (
                       boxSizing: "border-box",
                     }}
                   />
-                  <input
-                    value={authForm.inviteCode}
-                    onChange={(event) =>
-                      setAuthForm((prev) => ({ ...prev, inviteCode: event.target.value.toUpperCase() }))
-                    }
-                    placeholder="Davet kodu"
+                  <button
+                    type="button"
+                    onClick={() => setShowInviteCode((prev) => !prev)}
                     style={{
-                      width: "100%",
-                      padding: "12px 14px",
-                      border: "1px solid #d1d5db",
-                      borderRadius: 12,
-                      fontSize: 14,
-                      boxSizing: "border-box",
+                      alignSelf: "flex-start",
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      color: "#2563eb",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
                     }}
-                  />
+                  >
+                    {showInviteCode ? "Davet kodunu gizle" : "Davet kodum var"}
+                  </button>
+                  {showInviteCode && (
+                    <input
+                      value={authForm.inviteCode}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({
+                          ...prev,
+                          inviteCode: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="Davet kodu (opsiyonel)"
+                      style={{
+                        width: "100%",
+                        padding: "12px 14px",
+                        border: "1px solid #d1d5db",
+                        borderRadius: 12,
+                        fontSize: 14,
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  )}
                 </>
               )}
               <input
@@ -4051,6 +4266,13 @@ const handleFileUpload = async (
                   const topic = getWeekTitle(index);
                   const isExam = topic.includes("Final") || topic.includes("Vize");
                   const isEditing = editingWeek === index;
+                  const hasPdfMaterial = Boolean(materials[index]?.pdf);
+                  const audioAutomationLoading = Boolean(
+                    automationLoading[buildAutomationKey("audio_summary", index)],
+                  );
+                  const infographicAutomationLoading = Boolean(
+                    automationLoading[buildAutomationKey("infographic", index)],
+                  );
 
                   return (
                     <div
@@ -4424,6 +4646,71 @@ const handleFileUpload = async (
                           </label>
                         )}
                       </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => void runAutomation("audio_summary", index)}
+                          disabled={!hasPdfMaterial || audioAutomationLoading}
+                          title={
+                            hasPdfMaterial
+                              ? "Yüklediğin PDF'den AI ile sesli özet üret"
+                              : "Önce bu hafta için bir PDF yükle"
+                          }
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "8px 14px",
+                            background: hasPdfMaterial ? "#eff6ff" : "#f3f4f6",
+                            color: hasPdfMaterial ? "#1d4ed8" : "#9ca3af",
+                            border: hasPdfMaterial ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
+                            borderRadius: 999,
+                            cursor:
+                              !hasPdfMaterial || audioAutomationLoading ? "not-allowed" : "pointer",
+                            fontWeight: 600,
+                            fontSize: 12,
+                            opacity: audioAutomationLoading ? 0.75 : 1,
+                          }}
+                        >
+                          <Sparkles size={13} />
+                          <Headphones size={13} />
+                          {audioAutomationLoading ? "Sesli özet üretiliyor..." : "Sesli Özet Üret"}
+                        </button>
+                        <button
+                          onClick={() => void runAutomation("infographic", index)}
+                          disabled={!hasPdfMaterial || infographicAutomationLoading}
+                          title={
+                            hasPdfMaterial
+                              ? "Yüklediğin PDF'den AI ile PNG infografik üret"
+                              : "Önce bu hafta için bir PDF yükle"
+                          }
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "8px 14px",
+                            background: hasPdfMaterial ? "#fff7ed" : "#f3f4f6",
+                            color: hasPdfMaterial ? "#c2410c" : "#9ca3af",
+                            border: hasPdfMaterial ? "1px solid #fdba74" : "1px solid #e5e7eb",
+                            borderRadius: 999,
+                            cursor:
+                              !hasPdfMaterial || infographicAutomationLoading
+                                ? "not-allowed"
+                                : "pointer",
+                            fontWeight: 600,
+                            fontSize: 12,
+                            opacity: infographicAutomationLoading ? 0.75 : 1,
+                          }}
+                        >
+                          <Sparkles size={13} />
+                          <ImageIcon size={13} />
+                          {infographicAutomationLoading
+                            ? "İnfografik üretiliyor..."
+                            : "İnfografik Üret"}
+                        </button>
+                      </div>
+                      <p style={{ margin: "10px 0 0", fontSize: 12, color: "#9ca3af" }}>
+                        PDF yüklendiğinde bu haftaya özel sesli özet ve PNG infografik otomatik üretilebilir.
+                      </p>
                     </div>
                   );
                 })}
@@ -4705,6 +4992,49 @@ const handleFileUpload = async (
                         onChange={(event) => handleFlashcardCSV(examView.weekIndex, event)}
                       />
                     </label>
+                    <button
+                      onClick={() => void runAutomation("flashcards", examView.weekIndex)}
+                      disabled={
+                        !materials[examView.weekIndex]?.pdf ||
+                        Boolean(
+                          automationLoading[
+                            buildAutomationKey("flashcards", examView.weekIndex)
+                          ],
+                        )
+                      }
+                      title={
+                        materials[examView.weekIndex]?.pdf
+                          ? "Bu haftanın PDF materyalinden AI ile bilgi kartı üret"
+                          : "Önce bu hafta için bir PDF yükle"
+                      }
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "8px 16px",
+                        background: materials[examView.weekIndex]?.pdf ? "#eff6ff" : "#f3f4f6",
+                        color: materials[examView.weekIndex]?.pdf ? "#1d4ed8" : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf
+                          ? "1px solid #bfdbfe"
+                          : "1px solid #e5e7eb",
+                        borderRadius: 8,
+                        cursor:
+                          !materials[examView.weekIndex]?.pdf ||
+                          Boolean(
+                            automationLoading[
+                              buildAutomationKey("flashcards", examView.weekIndex)
+                            ],
+                          )
+                            ? "not-allowed"
+                            : "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Sparkles size={14} />
+                      {automationLoading[buildAutomationKey("flashcards", examView.weekIndex)]
+                        ? "Üretiliyor..."
+                        : "AI ile Üret"}
+                    </button>
                     {flashcards[examView.weekIndex]?.length > 0 && (
                       <button
                         onClick={() => startFlashcardPlay(examView.weekIndex)}
@@ -4727,6 +5057,9 @@ const handleFileUpload = async (
                   </div>
                   <p style={{ fontSize: 11, color: "#9ca3af", marginBottom: 16 }}>
                     CSV: ön_yüz,arka_yüz
+                  </p>
+                  <p style={{ fontSize: 11, color: "#9ca3af", marginTop: -8, marginBottom: 16 }}>
+                    PDF yüklersen AI bu haftanın bilgi kartlarını otomatik üretebilir.
                   </p>
                   {!flashcards[examView.weekIndex]?.length ? (
                     <div
@@ -4864,6 +5197,49 @@ const handleFileUpload = async (
                         onChange={(event) => handleTestCSV(examView.weekIndex, event)}
                       />
                     </label>
+                    <button
+                      onClick={() => void runAutomation("test_questions", examView.weekIndex)}
+                      disabled={
+                        !materials[examView.weekIndex]?.pdf ||
+                        Boolean(
+                          automationLoading[
+                            buildAutomationKey("test_questions", examView.weekIndex)
+                          ],
+                        )
+                      }
+                      title={
+                        materials[examView.weekIndex]?.pdf
+                          ? "Bu haftanın PDF materyalinden AI ile test sorusu üret"
+                          : "Önce bu hafta için bir PDF yükle"
+                      }
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "8px 16px",
+                        background: materials[examView.weekIndex]?.pdf ? "#ecfdf5" : "#f3f4f6",
+                        color: materials[examView.weekIndex]?.pdf ? "#047857" : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf
+                          ? "1px solid #6ee7b7"
+                          : "1px solid #e5e7eb",
+                        borderRadius: 8,
+                        cursor:
+                          !materials[examView.weekIndex]?.pdf ||
+                          Boolean(
+                            automationLoading[
+                              buildAutomationKey("test_questions", examView.weekIndex)
+                            ],
+                          )
+                            ? "not-allowed"
+                            : "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Sparkles size={14} />
+                      {automationLoading[buildAutomationKey("test_questions", examView.weekIndex)]
+                        ? "Üretiliyor..."
+                        : "AI ile Üret"}
+                    </button>
                     {testQuestions[examView.weekIndex]?.length > 0 && (
                       <button
                         onClick={() => startTestMode(examView.weekIndex)}
@@ -4886,6 +5262,9 @@ const handleFileUpload = async (
                   </div>
                   <p style={{ fontSize: 11, color: "#9ca3af", marginBottom: 16 }}>
                     CSV: soru,A,B,C,D,doğruIndex(0-3)
+                  </p>
+                  <p style={{ fontSize: 11, color: "#9ca3af", marginTop: -8, marginBottom: 16 }}>
+                    PDF yüklersen AI bu haftanın çoktan seçmeli sorularını otomatik üretebilir.
                   </p>
                   {!testQuestions[examView.weekIndex]?.length ? (
                     <div
@@ -5049,9 +5428,62 @@ const handleFileUpload = async (
                         onChange={(event) => handleOpenEndedCSV(examView.weekIndex, event)}
                       />
                     </label>
+                    <button
+                      onClick={() =>
+                        void runAutomation("open_ended_questions", examView.weekIndex)
+                      }
+                      disabled={
+                        !materials[examView.weekIndex]?.pdf ||
+                        Boolean(
+                          automationLoading[
+                            buildAutomationKey("open_ended_questions", examView.weekIndex)
+                          ],
+                        )
+                      }
+                      title={
+                        materials[examView.weekIndex]?.pdf
+                          ? "Bu haftanın PDF materyalinden AI ile açık uçlu soru üret"
+                          : "Önce bu hafta için bir PDF yükle"
+                      }
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "8px 16px",
+                        background: materials[examView.weekIndex]?.pdf ? "#f5f3ff" : "#f3f4f6",
+                        color: materials[examView.weekIndex]?.pdf ? "#6d28d9" : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf
+                          ? "1px solid #d8b4fe"
+                          : "1px solid #e5e7eb",
+                        borderRadius: 8,
+                        cursor:
+                          !materials[examView.weekIndex]?.pdf ||
+                          Boolean(
+                            automationLoading[
+                              buildAutomationKey(
+                                "open_ended_questions",
+                                examView.weekIndex,
+                              )
+                            ],
+                          )
+                            ? "not-allowed"
+                            : "pointer",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <Sparkles size={14} />
+                      {automationLoading[
+                        buildAutomationKey("open_ended_questions", examView.weekIndex)
+                      ]
+                        ? "Üretiliyor..."
+                        : "AI ile Üret"}
+                    </button>
                   </div>
                   <p style={{ fontSize: 11, color: "#9ca3af", marginBottom: 16 }}>
                     CSV: soru,model_cevap
+                  </p>
+                  <p style={{ fontSize: 11, color: "#9ca3af", marginTop: -8, marginBottom: 16 }}>
+                    PDF yüklersen AI bu haftanın açık uçlu sorularını otomatik üretebilir.
                   </p>
                   {!openEndedQuestions[examView.weekIndex]?.length ? (
                     <div

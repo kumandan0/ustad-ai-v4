@@ -3,7 +3,10 @@ import { createClient, type SupabaseClient, type User } from "@supabase/supabase
 import type { NextRequest, NextResponse } from "next/server";
 import { createRouteHandlerSupabaseClient, createServiceRoleSupabaseClient } from "@/lib/supabase/server";
 import { getSupabasePublishableKey, getSupabaseUrl } from "@/lib/supabase/config";
-import { maybeMigrateLegacyWorkspace } from "@/lib/server/legacy-migration";
+import {
+  maybeMigrateLegacyMaterialsToSupabase,
+  maybeMigrateLegacyWorkspace,
+} from "@/lib/server/legacy-migration";
 
 export type UserRole = "admin" | "student";
 
@@ -126,18 +129,42 @@ async function buildAuthContext(request: NextRequest) {
   }
 
   const profile = await getProfileById(supabase, user.id);
-  await maybeMigrateLegacyWorkspace({
-    supabase,
-    user: {
-      id: user.id,
-      email: user.email || "",
-    },
-  });
-  const refreshedProfile = await getProfileById(supabase, user.id);
   return {
-    user: buildSessionUser(refreshedProfile ?? profile, user),
+    user: buildSessionUser(profile, user),
     supabase,
     applyCookies,
+  } satisfies AuthContext;
+}
+
+export async function bootstrapUserWorkspace(request: NextRequest) {
+  const context = await requireUser(request);
+
+  await maybeMigrateLegacyWorkspace({
+    supabase: context.supabase,
+    user: {
+      id: context.user.id,
+      email: context.user.email,
+    },
+  });
+
+  await maybeMigrateLegacyMaterialsToSupabase({
+    supabase: context.supabase,
+    user: {
+      id: context.user.id,
+    },
+  });
+
+  const refreshedProfile = await getProfileById(context.supabase, context.user.id);
+
+  return {
+    ...context,
+    user: buildSessionUser(refreshedProfile, {
+      id: context.user.id,
+      email: context.user.email,
+      user_metadata: {
+        full_name: context.user.name,
+      },
+    } as User),
   } satisfies AuthContext;
 }
 
@@ -187,20 +214,10 @@ export async function registerUser(
   assertStrongPassword(password);
 
   const publicClient = await createVerifiedPublicClient();
-  const { data: registrationGate, error: gateError } = await publicClient.rpc("get_registration_gate");
-  if (gateError) {
-    throw new AuthError("Kayıt ayarları okunamadı.", 500);
-  }
-
-  const requiresInvite = Boolean(registrationGate?.requires_invite);
   let validatedInviteId: number | null = null;
+  const inviteCode = input.inviteCode?.trim() ?? "";
 
-  if (requiresInvite) {
-    const inviteCode = input.inviteCode?.trim() ?? "";
-    if (!inviteCode) {
-      throw new AuthError("Kayıt için admin davet kodu gerekli.", 400);
-    }
-
+  if (inviteCode) {
     const { data: inviteValidation, error: inviteError } = await publicClient.rpc(
       "validate_invite_code",
       {

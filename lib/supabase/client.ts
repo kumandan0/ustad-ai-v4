@@ -1,5 +1,11 @@
 "use client";
 
+import {
+  buildMaterialFileUrl,
+  MATERIAL_STORAGE_BUCKET,
+  normalizeMaterialFileUrl,
+} from "@/lib/storage/shared";
+
 type Primitive = string | number | boolean | null;
 type Row = Record<string, any>;
 type TableName =
@@ -312,41 +318,6 @@ async function uploadFile(
   fileName?: string,
   options?: { courseId?: number },
 ) {
-  const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  // Eğer Vercel'e Supabase API ayarlarını girdiysen, dosyayı doğrudan geniş otobandan yükler
-  if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-    try {
-      const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${filePath}`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
-          "x-upsert": "true", // Aynı isimde dosya varsa hatasız üzerine yazar
-          "Content-Type": file.type || "application/octet-stream",
-        },
-        body: file,
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({}));
-        throw new Error(err.message || "Supabase doğrudan yükleme hatası");
-      }
-
-      const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${filePath}`;
-      return {
-        data: { path: filePath, publicUrl },
-        error: null,
-      };
-    } catch (error) {
-      return {
-        data: null,
-        error: error instanceof Error ? error : new Error("Doğrudan yükleme başarısız."),
-      };
-    }
-  }
-
-  // YEDEK PLAN: Eğer ayarlar yoksa Vercel üzerinden denemeye devam eder (Ama hata verebilir)
   const formData = new FormData();
   formData.append("bucket", bucket);
   formData.append("path", filePath);
@@ -424,10 +395,13 @@ export async function migrateLegacyDataIfNeeded(): Promise<boolean> {
 
     const uploadPath = buildMigrationPath(material, sourceUrl);
     const { data, error } = await uploadFile(
-      "law-tutor-files",
+      MATERIAL_STORAGE_BUCKET,
       uploadPath,
       blob,
       String(material.file_name ?? `material-${material.id}`),
+      {
+        courseId: Number(material.course_id ?? 0) || undefined,
+      },
     );
 
     if (!error && data?.publicUrl) {
@@ -536,8 +510,7 @@ class QueryBuilder<T extends Row | Row[] | null>
 }
 
 function buildFileUrl(bucket: string, filePath: string) {
-  const params = new URLSearchParams({ bucket, path: filePath });
-  return `/api/files?${params.toString()}`;
+  return buildMaterialFileUrl(bucket, filePath);
 }
 
 export async function resolveStoredFileUrl(url: string): Promise<string> {
@@ -545,42 +518,21 @@ export async function resolveStoredFileUrl(url: string): Promise<string> {
     return "";
   }
 
-  if (url.startsWith("/api/files") || url.startsWith("http://") || url.startsWith("https://")) {
-    return url;
-  }
-
   if (url.startsWith("idb://") || url.startsWith("data:")) {
     return resolveLegacyObjectUrl(url);
   }
 
-  return url;
+  return normalizeMaterialFileUrl(url);
 }
 
 export async function deleteStoredFileUrl(url: string): Promise<void> {
   try {
-    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    // Supabase'den doğrudan silme işlemi
-    if (SUPABASE_URL && SUPABASE_ANON_KEY && url.startsWith(SUPABASE_URL)) {
-      const prefix = `${SUPABASE_URL}/storage/v1/object/public/`;
-      if (url.startsWith(prefix)) {
-        const pathParts = url.replace(prefix, '').split('/');
-        const bucket = pathParts[0];
-        const filePath = pathParts.slice(1).join('/');
-        await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${filePath}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
-        });
-      }
+    const normalized = normalizeMaterialFileUrl(url);
+    if (!normalized.startsWith("/api/files")) {
       return;
     }
 
-    const parsed = new URL(url, window.location.origin);
-    if (parsed.pathname !== "/api/files") {
-      return;
-    }
-
+    const parsed = new URL(normalized, window.location.origin);
     await fetch(parsed.toString(), { method: "DELETE" });
   } catch {
     // Ignore cleanup failures
@@ -606,10 +558,6 @@ export function createClient(): any {
             options?: { courseId?: number },
           ) => uploadFile(bucket, filePath, file, file.name, options),
           getPublicUrl(filePath: string) {
-            const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-            if (SUPABASE_URL) {
-              return { data: { publicUrl: `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${filePath}` } };
-            }
             return { data: { publicUrl: buildFileUrl(bucket, filePath) } };
           },
         };
@@ -617,3 +565,5 @@ export function createClient(): any {
     },
   };
 }
+
+export { MATERIAL_STORAGE_BUCKET };

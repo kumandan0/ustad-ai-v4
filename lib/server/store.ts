@@ -2,6 +2,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { del, get, put } from "@vercel/blob";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  buildMaterialFileUrl,
+  type StorageProvider,
+} from "@/lib/storage/shared";
 
 type Primitive = string | number | boolean | null;
 type Row = Record<string, any>;
@@ -172,12 +176,47 @@ function inferContentType(filePath: string) {
   }
 }
 
-export async function storeUploadedFile(bucket: string, filePath: string, file: File) {
-  const storedPath = `${normalizeStoragePath(bucket)}/${normalizeStoragePath(filePath)}`;
+async function buildStoredFileDetails(bucket: string, filePath: string, file: File) {
+  const storedPath = normalizeStoragePath(filePath);
+  const normalizedBucket = normalizeStoragePath(bucket);
   const contentType = file.type || inferContentType(filePath);
+  const fileBuffer = Buffer.from(await file.arrayBuffer());
+
+  return {
+    path: storedPath,
+    publicUrl: buildMaterialFileUrl(normalizedBucket, storedPath),
+    contentType,
+    fileBuffer,
+  };
+}
+
+async function storeFileInSupabaseStorage(
+  client: SupabaseClient,
+  bucket: string,
+  filePath: string,
+  fileBuffer: Buffer,
+  contentType: string,
+) {
+  const { error } = await client.storage.from(bucket).upload(filePath, fileBuffer, {
+    upsert: true,
+    contentType,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function storeFileInLegacyStorage(
+  bucket: string,
+  filePath: string,
+  fileBuffer: Buffer,
+  contentType: string,
+) {
+  const storedPath = `${normalizeStoragePath(bucket)}/${normalizeStoragePath(filePath)}`;
 
   if (blobToken) {
-    const blob = await put(storedPath, file, {
+    const blob = await put(storedPath, fileBuffer, {
       access: "public",
       allowOverwrite: true,
       contentType,
@@ -196,10 +235,9 @@ export async function storeUploadedFile(bucket: string, filePath: string, file: 
   }
 
   const absolutePath = getLocalUploadPath(storedPath);
-  const buffer = Buffer.from(await file.arrayBuffer());
 
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-  await fs.writeFile(absolutePath, buffer);
+  await fs.writeFile(absolutePath, fileBuffer);
 
   return {
     path: storedPath,
@@ -208,7 +246,7 @@ export async function storeUploadedFile(bucket: string, filePath: string, file: 
   };
 }
 
-export async function deleteStoredFile(bucket: string, filePath: string) {
+async function deleteFileFromLegacyStorage(bucket: string, filePath: string) {
   const storedPath = `${normalizeStoragePath(bucket)}/${normalizeStoragePath(filePath)}`;
 
   if (blobToken) {
@@ -229,7 +267,18 @@ export async function deleteStoredFile(bucket: string, filePath: string) {
   }
 }
 
-export async function readStoredFile(bucket: string, filePath: string) {
+async function deleteFileFromSupabaseStorage(
+  client: SupabaseClient,
+  bucket: string,
+  filePath: string,
+) {
+  const { error } = await client.storage.from(bucket).remove([filePath]);
+  if (error) {
+    throw error;
+  }
+}
+
+async function readLegacyStoredFile(bucket: string, filePath: string) {
   const storedPath = `${normalizeStoragePath(bucket)}/${normalizeStoragePath(filePath)}`;
 
   if (blobToken) {
@@ -251,8 +300,101 @@ export async function readStoredFile(bucket: string, filePath: string) {
   return { buffer, contentType: inferContentType(filePath) };
 }
 
+async function readSupabaseStoredFile(
+  client: SupabaseClient,
+  bucket: string,
+  filePath: string,
+  contentType?: string | null,
+) {
+  const { data, error } = await client.storage.from(bucket).download(filePath);
+  if (error || !data) {
+    throw error ?? new Error("Dosya bulunamadi.");
+  }
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+  return {
+    buffer,
+    contentType: contentType || data.type || inferContentType(filePath),
+  };
+}
+
+export async function storeUploadedFile(params: {
+  client: SupabaseClient;
+  bucket: string;
+  filePath: string;
+  file: File;
+  provider?: StorageProvider;
+}) {
+  const fileDetails = await buildStoredFileDetails(params.bucket, params.filePath, params.file);
+  const provider = params.provider ?? "supabase";
+
+  if (provider === "supabase") {
+    await storeFileInSupabaseStorage(
+      params.client,
+      params.bucket,
+      fileDetails.path,
+      fileDetails.fileBuffer,
+      fileDetails.contentType,
+    );
+  } else {
+    await storeFileInLegacyStorage(
+      params.bucket,
+      fileDetails.path,
+      fileDetails.fileBuffer,
+      fileDetails.contentType,
+    );
+  }
+
+  return {
+    path: fileDetails.path,
+    publicUrl: fileDetails.publicUrl,
+    contentType: fileDetails.contentType,
+  };
+}
+
+export async function deleteStoredFile(params: {
+  client?: SupabaseClient;
+  bucket: string;
+  filePath: string;
+  provider?: StorageProvider | null;
+}) {
+  if (params.provider === "supabase") {
+    if (!params.client) {
+      throw new Error("Supabase istemcisi olmadan storage dosyasi silinemez.");
+    }
+
+    await deleteFileFromSupabaseStorage(params.client, params.bucket, params.filePath);
+    return;
+  }
+
+  await deleteFileFromLegacyStorage(params.bucket, params.filePath);
+}
+
+export async function readStoredFile(params: {
+  client?: SupabaseClient;
+  bucket: string;
+  filePath: string;
+  provider?: StorageProvider | null;
+  contentType?: string | null;
+}) {
+  if (params.provider === "supabase") {
+    if (!params.client) {
+      throw new Error("Supabase istemcisi olmadan storage dosyasi okunamaz.");
+    }
+
+    return readSupabaseStoredFile(
+      params.client,
+      params.bucket,
+      params.filePath,
+      params.contentType,
+    );
+  }
+
+  return readLegacyStoredFile(params.bucket, params.filePath);
+}
+
 export function getPublicFileUrl(bucket: string, filePath: string) {
-  return `/api/files?bucket=${bucket}&path=${filePath}`;
+  return buildMaterialFileUrl(bucket, filePath);
 }
 
 function normalizeStoragePath(value: string) {
