@@ -12,14 +12,18 @@ export async function POST(request: NextRequest) {
       name?: string;
       email?: string;
       password?: string;
-      inviteCode?: string;
+      acceptedKvkk?: boolean;
+      acceptedTerms?: boolean;
+      marketingConsent?: boolean;
     };
 
     const session = await registerUser(request, {
       name: body.name ?? "",
       email: body.email ?? "",
       password: body.password ?? "",
-      inviteCode: body.inviteCode ?? "",
+      acceptedKvkk: Boolean(body.acceptedKvkk),
+      acceptedTerms: Boolean(body.acceptedTerms),
+      marketingConsent: Boolean(body.marketingConsent),
     });
 
     const response = NextResponse.json({ user: session.user });

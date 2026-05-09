@@ -44,6 +44,7 @@ const LEGACY_FILE_STORE_NAME = "files";
 const LEGACY_MIGRATION_FLAG = "ustad-ai-legacy-migrated-v1";
 
 const legacyObjectUrlCache = new Map<string, string>();
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
 
 const EMPTY_LEGACY_DB: LegacyDbShape = {
   users: [],
@@ -522,7 +523,39 @@ export async function resolveStoredFileUrl(url: string): Promise<string> {
     return resolveLegacyObjectUrl(url);
   }
 
-  return normalizeMaterialFileUrl(url);
+  const normalized = normalizeMaterialFileUrl(url);
+  if (!normalized.startsWith("/api/files")) {
+    return normalized;
+  }
+
+  const cached = signedUrlCache.get(normalized);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.url;
+  }
+
+  try {
+    const parsed = new URL(normalized, window.location.origin);
+    const response = await fetch(
+      `/api/files/url?bucket=${encodeURIComponent(parsed.searchParams.get("bucket") ?? "")}&path=${encodeURIComponent(parsed.searchParams.get("path") ?? "")}`,
+      { cache: "no-store" },
+    );
+    const payload = (await response.json().catch(() => ({}))) as {
+      url?: string;
+      expiresIn?: number;
+    };
+
+    if (response.ok && payload.url) {
+      signedUrlCache.set(normalized, {
+        url: payload.url,
+        expiresAt: Date.now() + Math.max(30, Number(payload.expiresIn ?? 300) - 15) * 1000,
+      });
+      return payload.url;
+    }
+  } catch {
+    // Fallback below.
+  }
+
+  return normalized;
 }
 
 export async function deleteStoredFileUrl(url: string): Promise<void> {

@@ -175,6 +175,7 @@ const DEFAULT_COURSE: Omit<Course, "id"> = {
 
 const DEFAULT_ASSISTANT_PROMPT = "Sen yardımsever bir öğretmen asistanısın. Türkçe yanıt ver.";
 const ACTIVE_COURSE_STORAGE_KEY = "ustad-ai-active-course-id";
+const BOOTSTRAP_SESSION_KEY_PREFIX = "ustad-ai-bootstrap";
 
 const buildCourseSyllabus = (weeks: number) =>
   Array.from({ length: weeks }, (_, index) => `Hafta ${index + 1} Konusu`);
@@ -291,8 +292,20 @@ export default function UstadAI() {
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authError, setAuthError] = useState("");
-  const [showInviteCode, setShowInviteCode] = useState(false);
-  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "", inviteCode: "" });
+  const [authForm, setAuthForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+    inviteCode: "",
+    acceptedKvkk: false,
+    acceptedTerms: false,
+    marketingConsent: false,
+  });
+  const [legalModal, setLegalModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    url: string;
+  }>({ isOpen: false, title: "", url: "" });
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([]);
   const [adminInvites, setAdminInvites] = useState<AdminInviteSummary[]>([]);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
@@ -460,11 +473,20 @@ export default function UstadAI() {
     setAuthSubmitting(true);
     setAuthError("");
 
+    if (authMode === "register" && (!authForm.acceptedKvkk || !authForm.acceptedTerms)) {
+      setAuthError("Devam etmek için zorunlu onay kutularını işaretlemelisin.");
+      setAuthSubmitting(false);
+      return;
+    }
+
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(authForm),
+        body: JSON.stringify({
+          ...authForm,
+          inviteCode: "",
+        }),
       });
 
       const payload = (await response.json().catch(() => ({}))) as {
@@ -479,8 +501,15 @@ export default function UstadAI() {
 
       resetWorkspaceState();
       setSessionUser(payload.user);
-      setAuthForm({ name: "", email: "", password: "", inviteCode: "" });
-      setShowInviteCode(false);
+      setAuthForm({
+        name: "",
+        email: "",
+        password: "",
+        inviteCode: "",
+        acceptedKvkk: false,
+        acceptedTerms: false,
+        marketingConsent: false,
+      });
       setAuthMode("login");
       setActiveTab("curriculum");
       setChatMode("general");
@@ -501,8 +530,15 @@ export default function UstadAI() {
     resetWorkspaceState();
     setSessionUser(null);
     setAuthMode("login");
-    setAuthForm({ name: "", email: "", password: "", inviteCode: "" });
-    setShowInviteCode(false);
+    setAuthForm({
+      name: "",
+      email: "",
+      password: "",
+      inviteCode: "",
+      acceptedKvkk: false,
+      acceptedTerms: false,
+      marketingConsent: false,
+    });
     setAuthError("");
     setDataLoading(false);
   }, [resetWorkspaceState]);
@@ -805,7 +841,8 @@ export default function UstadAI() {
     [supabase],
   );
 
-  const loadCourses = useCallback(async () => {
+  const loadCourses = useCallback(async (options?: { allowDefaultInsert?: boolean }) => {
+    const allowDefaultInsert = options?.allowDefaultInsert ?? true;
     const { data } = await supabase.from("courses").select().order("created_at");
 
     if (data && data.length > 0) {
@@ -837,7 +874,13 @@ export default function UstadAI() {
 
         return parsed[0].id;
       });
-      return;
+      return true;
+    }
+
+    if (!allowDefaultInsert) {
+      setCourses([]);
+      setActiveCourseId(null);
+      return false;
     }
 
     const { data: inserted } = await supabase
@@ -853,7 +896,10 @@ export default function UstadAI() {
       };
       setCourses([parsed]);
       setActiveCourseId(parsed.id);
+      return true;
     }
+
+    return false;
   }, [supabase]);
 
   const loadCourseData = useCallback(
@@ -1064,16 +1110,51 @@ export default function UstadAI() {
     const loadInitialCourses = async () => {
       if (!cancelled) {
         setDataLoading(true);
-        try {
-          await fetchJsonWithTimeout<{ user?: SessionUser | null }>(
-            "/api/auth/bootstrap",
-            { method: "POST" },
-            15000,
-          );
-        } catch (error) {
-          console.error(error);
+        const bootstrapKey =
+          typeof window !== "undefined"
+            ? `${BOOTSTRAP_SESSION_KEY_PREFIX}:${sessionUser.id}:v1`
+            : "";
+        const hasBootstrapMarker =
+          typeof window !== "undefined" &&
+          bootstrapKey.length > 0 &&
+          window.sessionStorage.getItem(bootstrapKey) === "1";
+
+        const runBootstrap = async () => {
+          try {
+            await fetchJsonWithTimeout<{ user?: SessionUser | null }>(
+              "/api/auth/bootstrap",
+              { method: "POST" },
+              15000,
+            );
+            if (typeof window !== "undefined" && bootstrapKey.length > 0) {
+              window.sessionStorage.setItem(bootstrapKey, "1");
+            }
+          } catch (error) {
+            console.error(error);
+          }
+        };
+
+        const hasCourses = await loadCourses({ allowDefaultInsert: false });
+        if (cancelled) {
+          return;
         }
-        await loadCourses();
+
+        if (hasCourses) {
+          setDataLoading(false);
+          if (!hasBootstrapMarker) {
+            void runBootstrap();
+          }
+          return;
+        }
+
+        if (!hasBootstrapMarker) {
+          await runBootstrap();
+          if (cancelled) {
+            return;
+          }
+        }
+
+        await loadCourses({ allowDefaultInsert: true });
       }
     };
 
@@ -2027,6 +2108,71 @@ const handleFileUpload = async (
             "radial-gradient(circle at top, rgba(37,99,235,0.16), transparent 30%), linear-gradient(180deg, #eff6ff 0%, #f8fafc 35%, #ffffff 100%)",
         }}
       >
+        {legalModal.isOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15,23,42,0.52)",
+              zIndex: 70,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 20,
+            }}
+          >
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 960,
+                height: "88vh",
+                background: "#fff",
+                borderRadius: 24,
+                boxShadow: "0 30px 80px rgba(15,23,42,0.22)",
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "18px 22px",
+                  borderBottom: "1px solid #e5e7eb",
+                  background: "#fff",
+                }}
+              >
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 18, color: "#111827" }}>
+                    {legalModal.title}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
+                    Metni okuyup kayıt ekranına geri dönebilirsin.
+                  </div>
+                </div>
+                <button
+                  onClick={() => setLegalModal({ isOpen: false, title: "", url: "" })}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "#6b7280",
+                  }}
+                >
+                  <X size={22} />
+                </button>
+              </div>
+              <iframe
+                src={legalModal.url}
+                title={legalModal.title}
+                style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
+              />
+            </div>
+          </div>
+        )}
+
         <div
           style={{
             width: "100%",
@@ -2050,29 +2196,48 @@ const handleFileUpload = async (
               Ustad<span style={{ color: "#60a5fa" }}>.ai</span>
             </div>
             <h1 style={{ fontSize: 34, lineHeight: 1.15, margin: "0 0 14px" }}>
-              Her öğrenciye özel hukuk çalışma alanı
+              Derslerini, materyallerini ve imtihan hazırlığını tek çalışma alanında topla
             </h1>
             <p style={{ color: "#cbd5e1", fontSize: 15, lineHeight: 1.7, margin: "0 0 22px" }}>
-              Giriş yaptıktan sonra derslerin, materyallerin, testlerin ve sohbet geçmişin sadece sana ait olur.
+              Ustad.ai; müfredatını, ders materyallerini, testlerini, ölçme-değerlendirme sonuçlarını ve AI sohbet desteğini tek yerde düzenlemeni sağlar.
             </p>
             <div style={{ display: "grid", gap: 12 }}>
               {[
-                "Her kullanıcı kendi derslerini ve yüklediği materyalleri görür.",
-                "İlk oluşturulan hesap admin olur ve üyeleri görüntüleyebilir.",
-                "Ölçme-değerlendirme, sohbet ve müfredat verileri kullanıcı bazında ayrılır.",
+                {
+                  title: "Müfredatını düzenle",
+                  description:
+                    "Derslerini haftalara ayır, PDF, ses kaydı ve görsellerini ilgili konularla birlikte sakla.",
+                },
+                {
+                  title: "İmtihana hazırlan",
+                  description:
+                    "Bilgi kartları, test soruları ve açık uçlu sorularla çalış; istersen kendi içeriklerini ekle, istersen AI desteğiyle yeni içerikler oluştur.",
+                },
+                {
+                  title: "Eksiklerini gör",
+                  description:
+                    "Çözdüğün testlerdeki doğru cevap oranlarını takip et; hangi konularda güçlü olduğunu, hangi konularda tekrar yapman gerektiğini gör.",
+                },
+                {
+                  title: "AI ile sohbet et",
+                  description:
+                    "Genel AI sohbetinden destek al veya yalnızca kendi ders materyallerine odaklanan sohbet modu ile kaynaklarına göre cevaplar al.",
+                },
               ].map((item) => (
                 <div
-                  key={item}
+                  key={item.title}
                   style={{
                     background: "rgba(255,255,255,0.08)",
                     border: "1px solid rgba(255,255,255,0.08)",
                     borderRadius: 14,
-                    padding: "12px 14px",
+                    padding: "14px 16px",
                     color: "#e2e8f0",
-                    fontSize: 14,
                   }}
                 >
-                  {item}
+                  <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{item.title}</div>
+                  <div style={{ fontSize: 13, lineHeight: 1.6, color: "#cbd5e1" }}>
+                    {item.description}
+                  </div>
                 </div>
               ))}
             </div>
@@ -2096,7 +2261,6 @@ const handleFileUpload = async (
                   onClick={() => {
                     setAuthMode(mode);
                     setAuthError("");
-                    setShowInviteCode(false);
                   }}
                   style={{
                     flex: 1,
@@ -2120,7 +2284,7 @@ const handleFileUpload = async (
             </h2>
             <p style={{ color: "#6b7280", fontSize: 14, lineHeight: 1.6, margin: "0 0 20px" }}>
               {authMode === "register"
-                ? "İlk kayıt olan kullanıcı otomatik olarak admin yapılır. Yeni kullanıcılar e-posta ile doğrudan kayıt olabilir; davet kodu varsa isteğe bağlı eklenebilir."
+                ? "Derslerini, materyallerini, testlerini ve çalışma ilerlemeni kendi kişisel alanında takip etmek için hesabını oluştur."
                 : "Kendi ders alanına ulaşmak için giriş yap."}
             </p>
 
@@ -2142,42 +2306,6 @@ const handleFileUpload = async (
                       boxSizing: "border-box",
                     }}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowInviteCode((prev) => !prev)}
-                    style={{
-                      alignSelf: "flex-start",
-                      background: "none",
-                      border: "none",
-                      padding: 0,
-                      color: "#2563eb",
-                      fontSize: 13,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {showInviteCode ? "Davet kodunu gizle" : "Davet kodum var"}
-                  </button>
-                  {showInviteCode && (
-                    <input
-                      value={authForm.inviteCode}
-                      onChange={(event) =>
-                        setAuthForm((prev) => ({
-                          ...prev,
-                          inviteCode: event.target.value.toUpperCase(),
-                        }))
-                      }
-                      placeholder="Davet kodu (opsiyonel)"
-                      style={{
-                        width: "100%",
-                        padding: "12px 14px",
-                        border: "1px solid #d1d5db",
-                        borderRadius: 12,
-                        fontSize: 14,
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  )}
                 </>
               )}
               <input
@@ -2217,6 +2345,143 @@ const handleFileUpload = async (
                   }
                 }}
               />
+              {authMode === "register" && (
+                <>
+                  <div
+                    style={{
+                      width: "100%",
+                      padding: "10px 12px",
+                      borderRadius: 12,
+                      background: "#f8fafc",
+                      color: "#64748b",
+                      fontSize: 12,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Kayıt işlemini tamamlamadan önce aydınlatma ve sözleşme metinlerini inceleyebilirsin.
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 10,
+                      padding: "12px 14px",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 12,
+                      background: "#fff",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={authForm.acceptedKvkk}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({
+                          ...prev,
+                          acceptedKvkk: event.target.checked,
+                        }))
+                      }
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLegalModal({
+                            isOpen: true,
+                            title: "KVKK Aydınlatma Metni",
+                            url: "/legal/kvkk-aydinlatma-metni.pdf",
+                          });
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          color: "#2563eb",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          textDecoration: "underline",
+                        }}
+                      >
+                        KVKK Aydınlatma Metni
+                      </button>{" "}
+                      ’ni okudum. (Zorunlu)
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 10,
+                      padding: "12px 14px",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 12,
+                      background: "#fff",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={authForm.acceptedTerms}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({
+                          ...prev,
+                          acceptedTerms: event.target.checked,
+                        }))
+                      }
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLegalModal({
+                            isOpen: true,
+                            title: "Kullanım Şartları / Üyelik Sözleşmesi",
+                            url: "/legal/kullanim-sartlari-uyelik-sozlesmesi.pdf",
+                          });
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          color: "#2563eb",
+                          fontWeight: 700,
+                          cursor: "pointer",
+                          textDecoration: "underline",
+                        }}
+                      >
+                        Kullanım Şartları / Üyelik Sözleşmesi
+                      </button>{" "}
+                      ’ni kabul ediyorum. (Zorunlu)
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 10,
+                      padding: "12px 14px",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 12,
+                      background: "#fff",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={authForm.marketingConsent}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({
+                          ...prev,
+                          marketingConsent: event.target.checked,
+                        }))
+                      }
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6 }}>
+                      Kampanya, duyuru ve pazarlama bildirimleri almak istiyorum. (İsteğe bağlı)
+                    </div>
+                  </div>
+                </>
+              )}
               {authError && (
                 <div
                   style={{
@@ -2233,16 +2498,30 @@ const handleFileUpload = async (
               )}
               <button
                 onClick={() => void handleAuthSubmit()}
-                disabled={authSubmitting}
+                disabled={
+                  authSubmitting ||
+                  (authMode === "register" &&
+                    (!authForm.acceptedKvkk || !authForm.acceptedTerms))
+                }
                 style={{
                   width: "100%",
                   padding: "12px 0",
-                  background: authSubmitting ? "#93c5fd" : "#2563eb",
+                  background:
+                    authSubmitting ||
+                    (authMode === "register" &&
+                      (!authForm.acceptedKvkk || !authForm.acceptedTerms))
+                      ? "#93c5fd"
+                      : "#2563eb",
                   color: "#fff",
                   border: "none",
                   borderRadius: 12,
                   fontWeight: 700,
-                  cursor: authSubmitting ? "not-allowed" : "pointer",
+                  cursor:
+                    authSubmitting ||
+                    (authMode === "register" &&
+                      (!authForm.acceptedKvkk || !authForm.acceptedTerms))
+                      ? "not-allowed"
+                      : "pointer",
                 }}
               >
                 {authSubmitting

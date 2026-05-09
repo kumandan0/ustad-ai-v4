@@ -197,7 +197,14 @@ export async function requireAdmin(request: NextRequest) {
 
 export async function registerUser(
   request: NextRequest,
-  input: { name: string; email: string; password: string; inviteCode?: string },
+  input: {
+    name: string;
+    email: string;
+    password: string;
+    acceptedKvkk: boolean;
+    acceptedTerms: boolean;
+    marketingConsent?: boolean;
+  },
 ) {
   const fullName = input.name.trim();
   const email = normalizeEmail(input.email);
@@ -211,31 +218,14 @@ export async function registerUser(
     throw new AuthError("Geçerli bir e-posta girin.", 400);
   }
 
-  assertStrongPassword(password);
-
-  const publicClient = await createVerifiedPublicClient();
-  let validatedInviteId: number | null = null;
-  const inviteCode = input.inviteCode?.trim() ?? "";
-
-  if (inviteCode) {
-    const { data: inviteValidation, error: inviteError } = await publicClient.rpc(
-      "validate_invite_code",
-      {
-        input_code: inviteCode,
-        input_email: email,
-      },
+  if (!input.acceptedKvkk || !input.acceptedTerms) {
+    throw new AuthError(
+      "KVKK Aydınlatma Metni ve Kullanım Şartları onaylanmadan kayıt oluşturulamaz.",
+      400,
     );
-
-    if (inviteError) {
-      throw new AuthError("Davet kodu doğrulanamadı.", 500);
-    }
-
-    if (!inviteValidation?.valid) {
-      throw new AuthError(String(inviteValidation?.error ?? "Geçersiz davet kodu."), 400);
-    }
-
-    validatedInviteId = Number(inviteValidation.invite_id);
   }
+
+  assertStrongPassword(password);
 
   const { supabase, applyCookies } = createRouteHandlerSupabaseClient(request);
   const signupResult = await supabase.auth.signUp({
@@ -244,6 +234,10 @@ export async function registerUser(
     options: {
       data: {
         full_name: fullName,
+        accepted_kvkk: true,
+        accepted_terms: true,
+        marketing_consent: Boolean(input.marketingConsent),
+        consented_at: new Date().toISOString(),
       },
     },
   });
@@ -270,12 +264,6 @@ export async function registerUser(
   }
 
   const profile = await getProfileById(supabase, sessionUser.id);
-
-  if (validatedInviteId) {
-    await supabase.rpc("consume_invite_code", {
-      invite_id: validatedInviteId,
-    });
-  }
 
   return {
     user: buildSessionUser(profile, sessionUser),

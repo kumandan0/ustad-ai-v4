@@ -102,6 +102,28 @@ export async function GET(request: NextRequest) {
     }
 
     const material = await findAuthorizedMaterialForFile(auth.supabase, bucket, filePath);
+
+    if (material.storage_provider === "supabase") {
+      const { data: signedData, error: signedError } = await auth.supabase.storage
+        .from(bucket)
+        .createSignedUrl(filePath, 60 * 5);
+
+      if (signedError || !signedData?.signedUrl) {
+        const message =
+          signedError?.message || "Dosya için imzalı bağlantı oluşturulamadı.";
+        return NextResponse.json({ error: message }, { status: 500 });
+      }
+
+      return auth.applyCookies(
+        NextResponse.redirect(signedData.signedUrl, {
+          status: 307,
+          headers: {
+            "Cache-Control": "private, max-age=60",
+          },
+        }),
+      );
+    }
+
     const file = await readStoredFile({
       client: auth.supabase,
       bucket,
