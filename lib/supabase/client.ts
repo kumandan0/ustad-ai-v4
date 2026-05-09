@@ -1,6 +1,11 @@
 "use client";
 
 import {
+  createClient as createBrowserSupabaseClient,
+  type SupabaseClient as BrowserSupabaseClient,
+} from "@supabase/supabase-js";
+import { getSupabasePublishableKey, getSupabaseUrl } from "@/lib/supabase/config";
+import {
   buildMaterialFileUrl,
   MATERIAL_STORAGE_BUCKET,
   normalizeMaterialFileUrl,
@@ -46,6 +51,7 @@ const LEGACY_MIGRATION_FLAG = "ustad-ai-legacy-migrated-v1";
 
 const legacyObjectUrlCache = new Map<string, string>();
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+let browserStorageClient: BrowserSupabaseClient | null = null;
 
 const EMPTY_LEGACY_DB: LegacyDbShape = {
   users: [],
@@ -165,6 +171,23 @@ async function requestJson<T>(url: string, body: Record<string, unknown>): DbRes
       error: error instanceof Error ? error : new Error("Request failed."),
     };
   }
+}
+
+function getBrowserStorageClient() {
+  if (!browserStorageClient) {
+    browserStorageClient = createBrowserSupabaseClient(
+      getSupabaseUrl(),
+      getSupabasePublishableKey(),
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      },
+    );
+  }
+
+  return browserStorageClient;
 }
 
 function clone<T>(value: T): T {
@@ -308,7 +331,24 @@ function buildMigrationPath(material: Row, sourceUrl: string) {
   return `materials/migrated/${material.course_id}/${material.week_index}/${material.id}-${fileName}`;
 }
 
-// YENİ: VERCEL LİMİTİNİ AŞIP DOĞRUDAN SUPABASE'E YÜKLEYEN FONKSİYON
+async function requestSignedUpload(
+  bucket: string,
+  filePath: string,
+  options?: { courseId?: number },
+) {
+  return requestJson<{
+    signedUrl: string;
+    token: string;
+    path: string;
+    publicUrl: string;
+    contentType?: string | null;
+  }>("/api/files/upload-url", {
+    bucket,
+    path: filePath,
+    courseId: options?.courseId ?? null,
+  });
+}
+
 async function uploadFile(
   bucket: string,
   filePath: string,
@@ -316,37 +356,49 @@ async function uploadFile(
   fileName?: string,
   options?: { courseId?: number },
 ) {
-  const formData = new FormData();
   const safeUploadName = sanitizeStorageSegment(
     fileName ?? (file instanceof File ? file.name : "upload.bin"),
   );
-  formData.append("bucket", bucket);
-  formData.append("path", filePath);
-  formData.append("file", file, safeUploadName);
-  if (options?.courseId) {
-    formData.append("courseId", String(options.courseId));
-  }
 
   try {
-    const response = await fetch("/api/files", {
-      method: "POST",
-      body: formData,
-    });
-
-    const payload = (await response.json().catch(() => ({}))) as {
-      data?: { path: string; publicUrl: string; contentType?: string };
-      error?: string;
-    };
-
-    if (!response.ok) {
+    const signedUpload = await requestSignedUpload(bucket, filePath, options);
+    if (signedUpload.error || !signedUpload.data) {
       return {
         data: null,
-        error: new Error(payload.error || `Upload failed with status ${response.status}`),
+        error: signedUpload.error ?? new Error("Yükleme bağlantısı oluşturulamadı."),
+      };
+    }
+
+    const storageClient = getBrowserStorageClient();
+    const fileBody =
+      typeof File !== "undefined" && file instanceof File
+        ? new File([file], safeUploadName, {
+            type: file.type || "application/octet-stream",
+            lastModified: Date.now(),
+          })
+        : file;
+    const { data, error } = await storageClient.storage
+      .from(bucket)
+      .uploadToSignedUrl(filePath, signedUpload.data.token, fileBody, {
+        upsert: true,
+        contentType:
+          (file instanceof Blob && file.type) || signedUpload.data.contentType || undefined,
+      });
+
+    if (error || !data) {
+      return {
+        data: null,
+        error: error ?? new Error("Dosya Supabase Storage'a yüklenemedi."),
       };
     }
 
     return {
-      data: payload.data ?? { path: filePath, publicUrl: buildFileUrl(bucket, filePath) },
+      data: {
+        path: data.path ?? signedUpload.data.path ?? filePath,
+        publicUrl: signedUpload.data.publicUrl ?? buildFileUrl(bucket, filePath),
+        contentType:
+          (file instanceof Blob && file.type) || signedUpload.data.contentType || undefined,
+      },
       error: null,
     };
   } catch (error) {
