@@ -309,6 +309,7 @@ const getAssessmentVisual = (progress: number, totalQuestions: number, available
 export default function UstadAI() {
   const supabaseRef = useRef<any>(null);
   const courseLoadRequestRef = useRef(0);
+  const courseStorageSyncRef = useRef<Set<number>>(new Set());
   const router = useRouter();
   if (!supabaseRef.current) {
     supabaseRef.current = createClient();
@@ -1189,6 +1190,47 @@ export default function UstadAI() {
     [prefetchMaterialPreview],
   );
 
+  const syncCourseMaterialsFromSupabase = useCallback(
+    async (courseId: number) => {
+      const response = await fetch("/api/files/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ courseId, weekIndex: null }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as {
+        data?: Material[];
+        error?: string;
+      };
+
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error || "Supabase Storage içeriği kursa bağlanamadı.");
+      }
+
+      const imported = payload.data.map((material) => ({
+        ...material,
+        preview_url: null,
+      })) as Material[];
+
+      setMaterials((prev) => {
+        const next = { ...prev };
+        imported.forEach((material) => {
+          const weekIndex = Number(material.week_index);
+          next[weekIndex] = {
+            ...(next[weekIndex] ?? {}),
+            [material.file_type]: material,
+          };
+        });
+        return next;
+      });
+
+      void Promise.all(
+        imported.map((material) => prefetchMaterialPreview(material, material.week_index)),
+      );
+    },
+    [prefetchMaterialPreview],
+  );
+
   const loadCourseData = useCallback(
     async (courseId: number) => {
       const requestId = courseLoadRequestRef.current + 1;
@@ -1370,6 +1412,17 @@ export default function UstadAI() {
           setMaterials({});
         }
 
+        const shouldAttemptCourseSync =
+          !courseStorageSyncRef.current.has(courseId) &&
+          resolvedWeeks.length > 0;
+
+        if (shouldAttemptCourseSync) {
+          courseStorageSyncRef.current.add(courseId);
+          void syncCourseMaterialsFromSupabase(courseId).catch((error) => {
+            console.error("Supabase Storage otomatik senkronizasyonu başarısız oldu:", error);
+          });
+        }
+
         if (resolvedWeeks.length > 0) {
           await syncLearningGoals(courseId, resolvedWeeks);
           if (isStale()) {
@@ -1388,7 +1441,7 @@ export default function UstadAI() {
         }
       }
     },
-    [courses, resolveMaterialPreviewUrl, supabase, syncLearningGoals],
+    [courses, resolveMaterialPreviewUrl, supabase, syncCourseMaterialsFromSupabase, syncLearningGoals],
   );
 
   useEffect(() => {
