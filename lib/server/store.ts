@@ -41,7 +41,25 @@ export type DbRequest = {
   selectAfterMutation?: boolean;
   returnSingle?: boolean;
   client: SupabaseClient;
+  scope?: QueryScope;
 };
+
+const USER_SCOPED_TABLES = new Set<TableName>([
+  "courses",
+  "weeks",
+  "flashcards",
+  "test_questions",
+  "open_ended_questions",
+  "materials",
+  "learning_goals",
+  "test_attempts",
+  "chat_threads",
+  "chat_messages",
+]);
+
+function isUserScopedTable(table: TableName) {
+  return USER_SCOPED_TABLES.has(table);
+}
 
 function applyFilters<TBuilder extends { eq: Function; is: Function }>(
   builder: TBuilder,
@@ -65,8 +83,14 @@ export async function queryTable(request: DbRequest) {
     throw new Error("Tablo belirtilmedi.");
   }
 
+  const scopeFilters =
+    request.scope && isUserScopedTable(request.table)
+      ? [{ column: "user_id", value: request.scope.userId } satisfies Filter]
+      : [];
+  const mergedFilters = [...scopeFilters, ...(request.filters ?? [])];
+
   if (request.action === "select") {
-    let builder = applyFilters(request.client.from(request.table).select("*"), request.filters);
+    let builder = applyFilters(request.client.from(request.table).select("*"), mergedFilters);
     if (request.orderColumn) {
       builder = builder.order(request.orderColumn, {
         ascending: request.ascending ?? true,
@@ -89,7 +113,16 @@ export async function queryTable(request: DbRequest) {
   }
 
   if (request.action === "insert") {
-    let builder = request.client.from(request.table).insert(request.payload as Row | Row[]);
+    const payloadWithScope =
+      request.scope && isUserScopedTable(request.table)
+        ? Array.isArray(request.payload)
+          ? (request.payload as Row[]).map((row) => ({ ...row, user_id: request.scope!.userId }))
+          : { ...(request.payload as Row), user_id: request.scope.userId }
+        : request.payload;
+
+    let builder = request.client
+      .from(request.table)
+      .insert(payloadWithScope as Row | Row[]);
     if (request.selectAfterMutation || request.returnSingle) {
       builder = builder.select();
     }
@@ -112,7 +145,7 @@ export async function queryTable(request: DbRequest) {
   if (request.action === "update") {
     let builder = applyFilters(
       request.client.from(request.table).update(request.payload as Row),
-      request.filters,
+      mergedFilters,
     );
 
     if (request.selectAfterMutation || request.returnSingle) {
@@ -134,7 +167,7 @@ export async function queryTable(request: DbRequest) {
     return data ?? [];
   }
 
-  let builder = applyFilters(request.client.from(request.table).delete(), request.filters);
+  let builder = applyFilters(request.client.from(request.table).delete(), mergedFilters);
   if (request.selectAfterMutation || request.returnSingle) {
     builder = builder.select();
   }

@@ -41,6 +41,7 @@ type MaterialAccessRow = {
 
 async function findAuthorizedMaterialForFile(
   client: Parameters<typeof queryTable>[0]["client"],
+  scope: NonNullable<Parameters<typeof queryTable>[0]["scope"]>,
   bucket: string,
   filePath: string,
 ) {
@@ -48,6 +49,7 @@ async function findAuthorizedMaterialForFile(
     action: "select",
     table: "materials",
     client,
+    scope,
   })) as MaterialAccessRow[];
 
   const matchedMaterial = materials.find((material) => {
@@ -74,6 +76,7 @@ function inferCourseIdFromFilePath(filePath: string) {
 
 async function ensureUserCanAccessCourse(
   client: Parameters<typeof queryTable>[0]["client"],
+  scope: NonNullable<Parameters<typeof queryTable>[0]["scope"]>,
   courseId: number,
 ) {
   const data = await queryTable({
@@ -82,6 +85,7 @@ async function ensureUserCanAccessCourse(
     filters: [{ column: "id", value: courseId }],
     returnSingle: true,
     client,
+    scope,
   });
 
   if (!data) {
@@ -101,7 +105,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Eksik dosya bilgisi." }, { status: 400 });
     }
 
-    const material = await findAuthorizedMaterialForFile(auth.supabase, bucket, filePath);
+    const material = await findAuthorizedMaterialForFile(
+      auth.supabase,
+      { userId: auth.user.id, role: auth.user.role },
+      bucket,
+      filePath,
+    );
 
     if (material.storage_provider === "supabase") {
       const { data: signedData, error: signedError } = await auth.supabase.storage
@@ -197,7 +206,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Geçersiz ders bilgisi." }, { status: 400 });
     }
 
-    await ensureUserCanAccessCourse(auth.supabase, courseId);
+    await ensureUserCanAccessCourse(
+      auth.supabase,
+      { userId: auth.user.id, role: auth.user.role },
+      courseId,
+    );
     const data = await storeUploadedFile({
       client: auth.supabase,
       bucket,

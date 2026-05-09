@@ -11,6 +11,10 @@ export async function POST(request: NextRequest) {
     const data = await queryTable({
       ...body,
       client: auth.supabase,
+      scope: {
+        userId: auth.user.id,
+        role: auth.user.role,
+      },
     });
     const response = NextResponse.json({ data });
     return auth.applyCookies(response);

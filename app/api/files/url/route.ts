@@ -18,6 +18,7 @@ type MaterialAccessRow = {
 
 async function findAuthorizedMaterialForFile(
   client: Parameters<typeof queryTable>[0]["client"],
+  scope: NonNullable<Parameters<typeof queryTable>[0]["scope"]>,
   bucket: string,
   filePath: string,
 ) {
@@ -25,6 +26,7 @@ async function findAuthorizedMaterialForFile(
     action: "select",
     table: "materials",
     client,
+    scope,
   })) as MaterialAccessRow[];
 
   return (
@@ -50,7 +52,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Eksik dosya bilgisi." }, { status: 400 });
     }
 
-    const material = await findAuthorizedMaterialForFile(auth.supabase, bucket, filePath);
+    const material = await findAuthorizedMaterialForFile(
+      auth.supabase,
+      { userId: auth.user.id, role: auth.user.role },
+      bucket,
+      filePath,
+    );
     if (!material) {
       return NextResponse.json({ error: "Bu dosyaya erişim izniniz yok." }, { status: 403 });
     }
