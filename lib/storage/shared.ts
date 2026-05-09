@@ -2,12 +2,41 @@ export const MATERIAL_STORAGE_BUCKET = "ustad-materials";
 
 export type StorageProvider = "local" | "supabase" | "google_drive" | "koofr";
 
+const TURKISH_CHAR_MAP: Record<string, string> = {
+  ç: "c",
+  Ç: "C",
+  ğ: "g",
+  Ğ: "G",
+  ı: "i",
+  İ: "I",
+  ö: "o",
+  Ö: "O",
+  ş: "s",
+  Ş: "S",
+  ü: "u",
+  Ü: "U",
+};
+
 function safeDecode(value: string) {
   try {
     return decodeURIComponent(value);
   } catch {
     return value;
   }
+}
+
+export function sanitizeStorageSegment(value: string) {
+  const transliterated = Array.from(value)
+    .map((character) => TURKISH_CHAR_MAP[character] ?? character)
+    .join("")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  return transliterated
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_")
+    || "file";
 }
 
 export function buildMaterialFileUrl(bucket: string, filePath: string) {

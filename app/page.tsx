@@ -49,6 +49,7 @@ import {
   MATERIAL_STORAGE_BUCKET,
   resolveStoredFileUrl,
 } from "@/lib/supabase/client";
+import { sanitizeStorageSegment } from "@/lib/storage/shared";
 
 interface Course {
   id: number;
@@ -181,9 +182,6 @@ const AUTOMATION_DIFFICULTY_LABELS: Record<AutomationDifficulty, string> = {
 const buildCourseSyllabus = (weeks: number) =>
   Array.from({ length: weeks }, (_, index) => `Hafta ${index + 1} Konusu`);
 
-const sanitizeStorageSegment = (value: string) =>
-  value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
-
 const buildWeeksPayload = (courseId: number, syllabus: string[]) =>
   syllabus.map((title, index) => ({
     course_id: courseId,
@@ -221,6 +219,34 @@ const parseCSV = (line: string) => {
 
   result.push(cur.trim());
   return result;
+};
+
+const formatUploadErrorMessage = (error: unknown) => {
+  const rawMessage = error instanceof Error ? error.message : "Dosya yüklenemedi.";
+  const message = rawMessage.toLowerCase();
+
+  if (message.includes("file name is invalid") || message.includes("invalid key")) {
+    return "Dosya adı Supabase için geçersiz görünüyor. Türkçe karakter, parantez veya özel işaretleri azaltıp tekrar deneyin.";
+  }
+
+  if (
+    message.includes("entity too large") ||
+    message.includes("request too large") ||
+    message.includes("body exceeded") ||
+    message.includes("payload too large")
+  ) {
+    return "Dosya yüklenemedi çünkü yükleme limiti aşıldı. Dosyayı biraz daha küçültüp tekrar deneyin.";
+  }
+
+  if (message.includes("mime") || message.includes("content-type")) {
+    return "Dosya türü desteklenmedi. Lütfen farklı bir formatla tekrar deneyin.";
+  }
+
+  if (message.includes("permission") || message.includes("not allowed") || message.includes("403")) {
+    return "Bu dosyayı yükleme izni bulunamadı. Oturumu yenileyip tekrar deneyin.";
+  }
+
+  return `Dosya yüklenemedi: ${rawMessage}`;
 };
 
 const sortLearningGoals = (goals: LearningGoal[]) =>
@@ -1966,7 +1992,7 @@ const handleFileUpload = async (
       void prefetchMaterialPreview(nextMaterial, weekIndex);
     } catch (error) {
       console.error(error);
-      alert("Dosya yüklenemedi. Lütfen daha küçük bir dosya deneyin veya sayfayı yenileyip tekrar deneyin.");
+      alert(formatUploadErrorMessage(error));
     } finally {
       event.target.value = "";
     }

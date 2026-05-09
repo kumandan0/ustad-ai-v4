@@ -4,6 +4,7 @@ import {
   buildMaterialFileUrl,
   MATERIAL_STORAGE_BUCKET,
   normalizeMaterialFileUrl,
+  sanitizeStorageSegment,
 } from "@/lib/storage/shared";
 
 type Primitive = string | number | boolean | null;
@@ -297,17 +298,13 @@ async function readLegacyBlobFromUrl(url: string): Promise<Blob | null> {
   return readLegacyIndexedFile(parsed.key);
 }
 
-function sanitizePathPart(value: string) {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
-}
-
 function buildMigrationPath(material: Row, sourceUrl: string) {
   const parsed = parseLegacyFileUrl(sourceUrl);
   if (parsed && "bucket" in parsed) {
     return parsed.filePath;
   }
 
-  const fileName = sanitizePathPart(String(material.file_name ?? `material-${material.id}`));
+  const fileName = sanitizeStorageSegment(String(material.file_name ?? `material-${material.id}`));
   return `materials/migrated/${material.course_id}/${material.week_index}/${material.id}-${fileName}`;
 }
 
@@ -320,9 +317,12 @@ async function uploadFile(
   options?: { courseId?: number },
 ) {
   const formData = new FormData();
+  const safeUploadName = sanitizeStorageSegment(
+    fileName ?? (file instanceof File ? file.name : "upload.bin"),
+  );
   formData.append("bucket", bucket);
   formData.append("path", filePath);
-  formData.append("file", file, fileName ?? (file instanceof File ? file.name : "upload.bin"));
+  formData.append("file", file, safeUploadName);
   if (options?.courseId) {
     formData.append("courseId", String(options.courseId));
   }

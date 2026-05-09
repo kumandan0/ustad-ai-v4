@@ -6,6 +6,7 @@ import {
   buildMaterialFileUrl,
   MATERIAL_STORAGE_BUCKET,
   parseMaterialFileUrl,
+  sanitizeStorageSegment,
   type StorageProvider,
 } from "@/lib/storage/shared";
 
@@ -31,6 +32,30 @@ function parseRangeHeader(rangeHeader: string | null, size: number) {
   return { start, end };
 }
 
+function formatStorageUploadError(error: unknown) {
+  const rawMessage = error instanceof Error ? error.message : "Dosya yuklenemedi.";
+  const message = rawMessage.toLowerCase();
+
+  if (message.includes("file name is invalid") || message.includes("invalid key")) {
+    return "Dosya adı Supabase için geçersiz. Lütfen dosya adındaki Türkçe karakterleri veya özel işaretleri azaltıp tekrar deneyin.";
+  }
+
+  if (
+    message.includes("entity too large") ||
+    message.includes("request too large") ||
+    message.includes("payload too large") ||
+    message.includes("body exceeded")
+  ) {
+    return "Dosya yüklenemedi çünkü platformun kabul ettiği yükleme boyutu aşıldı.";
+  }
+
+  if (message.includes("duplicate") || message.includes("already exists")) {
+    return "Aynı isimde bir dosya zaten var. Sayfayı yenileyip tekrar deneyin.";
+  }
+
+  return rawMessage;
+}
+
 type MaterialAccessRow = {
   id: number;
   user_id: string;
@@ -44,10 +69,6 @@ type MaterialAccessRow = {
   storage_file_id: string | null;
   mime_type: string | null;
 };
-
-function sanitizeStorageSegment(value: string) {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
-}
 
 async function tryMigrateLocalMaterialToSupabase(params: {
   supabase: Parameters<typeof queryTable>[0]["client"];
@@ -297,7 +318,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
 
-    const message = error instanceof Error ? error.message : "Dosya yuklenemedi.";
+    const message = formatStorageUploadError(error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
