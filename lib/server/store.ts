@@ -11,7 +11,6 @@ type Primitive = string | number | boolean | null;
 type Row = Record<string, any>;
 
 const blobToken = process.env.BLOB_READ_WRITE_TOKEN || "";
-const allowLocalDevelopmentStorage = process.env.ALLOW_LOCAL_STORAGE === "1" || !process.env.VERCEL;
 const dataDir = path.join(process.cwd(), ".data");
 const localUploadsDir = path.join(dataDir, "uploads");
 
@@ -230,14 +229,17 @@ async function storeFileInLegacyStorage(
     };
   }
 
-  if (!allowLocalDevelopmentStorage) {
-    throw new Error("BLOB_READ_WRITE_TOKEN environment variable is missing.");
-  }
-
   const absolutePath = getLocalUploadPath(storedPath);
-
-  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-  await fs.writeFile(absolutePath, fileBuffer);
+  try {
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, fileBuffer);
+  } catch (error) {
+    throw new Error(
+      `Legacy dosya yerel depoya yazılamadı: ${
+        error instanceof Error ? error.message : "bilinmeyen hata"
+      }`,
+    );
+  }
 
   return {
     path: storedPath,
@@ -252,10 +254,6 @@ async function deleteFileFromLegacyStorage(bucket: string, filePath: string) {
   if (blobToken) {
     await del(storedPath, { token: blobToken });
     return;
-  }
-
-  if (!allowLocalDevelopmentStorage) {
-    throw new Error("BLOB_READ_WRITE_TOKEN environment variable is missing.");
   }
 
   try {
@@ -292,12 +290,18 @@ async function readLegacyStoredFile(bucket: string, filePath: string) {
     return { buffer, contentType: blob.blob.contentType || inferContentType(filePath) };
   }
 
-  if (!allowLocalDevelopmentStorage) {
-    throw new Error("BLOB_READ_WRITE_TOKEN environment variable is missing.");
-  }
+  try {
+    const buffer = await fs.readFile(getLocalUploadPath(storedPath));
+    return { buffer, contentType: inferContentType(filePath) };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      throw new Error("Legacy dosya yerel depoda bulunamadı.");
+    }
 
-  const buffer = await fs.readFile(getLocalUploadPath(storedPath));
-  return { buffer, contentType: inferContentType(filePath) };
+    throw new Error(
+      `Legacy dosya okunamadı: ${error instanceof Error ? error.message : "bilinmeyen hata"}`,
+    );
+  }
 }
 
 async function readSupabaseStoredFile(
