@@ -114,6 +114,11 @@ type AutomationKind =
   | "flashcards"
   | "test_questions"
   | "open_ended_questions";
+type AutomationDifficulty = "easy" | "medium" | "hard";
+type QuestionAutomationKind = Extract<
+  AutomationKind,
+  "flashcards" | "test_questions" | "open_ended_questions"
+>;
 
 interface LearningGoal {
   id: number;
@@ -133,6 +138,7 @@ interface SessionUser {
   name: string;
   email: string;
   role: "admin" | "student";
+  ai_pro_enabled: boolean;
   created_at?: string;
 }
 
@@ -152,32 +158,24 @@ interface AdminInviteSummary {
   created_at?: string;
 }
 
-const DEFAULT_COURSE: Omit<Course, "id"> = {
-  name: "İnsan Hakları Hukuku",
-  description: "AİHM, AYM bireysel başvuru ve BM mekanizmaları",
-  system_prompt:
-    "Sen İnsan Hakları Hukuku alanında uzman bir Türk hukuk asistanısın. Öğrencilere Türkçe olarak yardım ediyorsun. Yanıtların açık, pedagojik ve pratik örneklerle desteklenmiş olsun.",
-  syllabus: [
-    "Dersin amacının ve işleniş stratejisinin anlatılması",
-    "Genel olarak insan haklarına giriş ve insan hakları felsefesi",
-    "İnsan haklarının özellikleri ve hakların sınıflandırılması",
-    "İnsan hakları koruma mekanizmaları",
-    "BM insan hakları koruma mekanizmaları",
-    "Anayasa Mahkemesi bireysel başvuru",
-    "Avrupa İnsan Hakları Mahkemesinin yapısı ve işleyişi",
-    "AİHM'ye bireysel başvuru ve şartlar",
-    "Genel tekrar ve ödev dağıtımı",
-    "Avrupa İnsan Hakları Sözleşmesindeki haklar",
-    "Ödev ve sunum",
-    "Ödev ve sunum",
-    "Ödev ve sunum",
-    "Final sınavı",
-  ],
-};
-
 const DEFAULT_ASSISTANT_PROMPT = "Sen yardımsever bir öğretmen asistanısın. Türkçe yanıt ver.";
 const ACTIVE_COURSE_STORAGE_KEY = "ustad-ai-active-course-id";
 const BOOTSTRAP_SESSION_KEY_PREFIX = "ustad-ai-bootstrap";
+
+const QUESTION_AUTOMATION_DEFAULTS: Record<
+  QuestionAutomationKind,
+  { count: number; min: number; max: number; label: string }
+> = {
+  flashcards: { count: 14, min: 4, max: 30, label: "bilgi kartı" },
+  test_questions: { count: 12, min: 4, max: 24, label: "test sorusu" },
+  open_ended_questions: { count: 6, min: 2, max: 12, label: "açık uçlu soru" },
+};
+
+const AUTOMATION_DIFFICULTY_LABELS: Record<AutomationDifficulty, string> = {
+  easy: "Kolay",
+  medium: "Orta",
+  hard: "Zor",
+};
 
 const buildCourseSyllabus = (weeks: number) =>
   Array.from({ length: weeks }, (_, index) => `Hafta ${index + 1} Konusu`);
@@ -314,6 +312,7 @@ export default function UstadAI() {
   const [adminInvites, setAdminInvites] = useState<AdminInviteSummary[]>([]);
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [adminLoading, setAdminLoading] = useState(false);
+  const [proAccessLoadingUserId, setProAccessLoadingUserId] = useState<string | null>(null);
   const [inviteForm, setInviteForm] = useState({ email: "", expiresInDays: 7 });
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
   const [resetPasswordUser, setResetPasswordUser] = useState<AdminUserSummary | null>(null);
@@ -398,6 +397,19 @@ export default function UstadAI() {
   const [input, setInput] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("general");
   const [automationLoading, setAutomationLoading] = useState<Record<string, boolean>>({});
+  const [automationConfigModal, setAutomationConfigModal] = useState<{
+    isOpen: boolean;
+    kind: QuestionAutomationKind | null;
+    weekIndex: number;
+    count: number;
+    difficulty: AutomationDifficulty;
+  }>({
+    isOpen: false,
+    kind: null,
+    weekIndex: 0,
+    count: QUESTION_AUTOMATION_DEFAULTS.flashcards.count,
+    difficulty: "medium",
+  });
   const [loading, setLoading] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
   const [stats, setStats] = useState({ messages: 0 });
@@ -405,6 +417,7 @@ export default function UstadAI() {
 
   const activeCourse = courses.find((course) => course.id === activeCourseId) ?? null;
   const isAdmin = sessionUser?.role === "admin";
+  const canUseAutomation = Boolean(sessionUser && (sessionUser.role === "admin" || sessionUser.ai_pro_enabled));
 
   const resetWorkspaceState = useCallback(() => {
     setCourses([]);
@@ -437,11 +450,37 @@ export default function UstadAI() {
     setResetPasswordUser(null);
     setPasswordModalOpen(false);
     setAutomationLoading({});
+    setAutomationConfigModal({
+      isOpen: false,
+      kind: null,
+      weekIndex: 0,
+      count: QUESTION_AUTOMATION_DEFAULTS.flashcards.count,
+      difficulty: "medium",
+    });
   }, []);
 
   const buildAutomationKey = useCallback(
     (kind: AutomationKind, weekIndex: number) => `${kind}:${weekIndex}`,
     [],
+  );
+
+  const openQuestionAutomationModal = useCallback(
+    (kind: QuestionAutomationKind, weekIndex: number) => {
+      if (!canUseAutomation) {
+        alert("AI ile otomatik üretim Pro özelliğidir. Bu hesap için henüz aktif değil.");
+        return;
+      }
+
+      const defaults = QUESTION_AUTOMATION_DEFAULTS[kind];
+      setAutomationConfigModal({
+        isOpen: true,
+        kind,
+        weekIndex,
+        count: defaults.count,
+        difficulty: "medium",
+      });
+    },
+    [canUseAutomation],
   );
 
   const fetchJsonWithTimeout = useCallback(
@@ -664,7 +703,7 @@ export default function UstadAI() {
     }
   }, [loadAdminPanel]);
 
-  const handleDeleteUser = useCallback(async (userId: number) => {
+  const handleDeleteUser = useCallback(async (userId: string) => {
     if (!confirm("Bu kullanıcıyı silmek istediğine emin misin? Tüm ders verileri de silinecek.")) {
       return;
     }
@@ -686,6 +725,32 @@ export default function UstadAI() {
       alert(error instanceof Error ? error.message : "Kullanıcı silinemedi.");
     }
   }, [loadAdminPanel]);
+
+  const handleToggleAutomationProAccess = useCallback(
+    async (userId: string, enabled: boolean) => {
+      setProAccessLoadingUserId(userId);
+
+      try {
+        const response = await fetch("/api/admin/users/pro", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId, enabled }),
+        });
+
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        if (!response.ok) {
+          throw new Error(payload.error || "Pro erişim güncellenemedi.");
+        }
+
+        await loadAdminPanel();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Pro erişim güncellenemedi.");
+      } finally {
+        setProAccessLoadingUserId(null);
+      }
+    },
+    [loadAdminPanel],
+  );
 
   const handleAdminPasswordReset = useCallback(async () => {
     if (!resetPasswordUser) {
@@ -880,8 +945,7 @@ export default function UstadAI() {
     [supabase],
   );
 
-  const loadCourses = useCallback(async (options?: { allowDefaultInsert?: boolean }) => {
-    const allowDefaultInsert = options?.allowDefaultInsert ?? true;
+  const loadCourses = useCallback(async () => {
     const { data } = await supabase.from("courses").select().order("created_at");
 
     if (data && data.length > 0) {
@@ -915,29 +979,8 @@ export default function UstadAI() {
       });
       return true;
     }
-
-    if (!allowDefaultInsert) {
-      setCourses([]);
-      setActiveCourseId(null);
-      return false;
-    }
-
-    const { data: inserted } = await supabase
-      .from("courses")
-      .insert({ ...DEFAULT_COURSE, syllabus: JSON.stringify(DEFAULT_COURSE.syllabus) })
-      .select()
-      .single();
-
-    if (inserted) {
-      const parsed = {
-        ...(inserted as Course),
-        syllabus: JSON.parse(String(inserted.syllabus ?? "[]")) as string[],
-      };
-      setCourses([parsed]);
-      setActiveCourseId(parsed.id);
-      return true;
-    }
-
+    setCourses([]);
+    setActiveCourseId(null);
     return false;
   }, [supabase]);
 
@@ -1308,7 +1351,7 @@ export default function UstadAI() {
           }
         };
 
-        const hasCourses = await loadCourses({ allowDefaultInsert: false });
+        const hasCourses = await loadCourses();
         if (cancelled) {
           return;
         }
@@ -1328,7 +1371,15 @@ export default function UstadAI() {
           }
         }
 
-        await loadCourses({ allowDefaultInsert: true });
+        const hasCoursesAfterBootstrap = await loadCourses();
+        if (cancelled) {
+          return;
+        }
+
+        setDataLoading(false);
+        if (!hasCoursesAfterBootstrap) {
+          setAddCourseModal(true);
+        }
       }
     };
 
@@ -2022,8 +2073,20 @@ const handleFileUpload = async (
   };
 
   const runAutomation = useCallback(
-    async (kind: AutomationKind, weekIndex: number) => {
+    async (
+      kind: AutomationKind,
+      weekIndex: number,
+      options?: {
+        count?: number;
+        difficulty?: AutomationDifficulty;
+      },
+    ) => {
       if (!activeCourseId) {
+        return;
+      }
+
+      if (!canUseAutomation) {
+        alert("AI ile otomatik üretim Pro özelliğidir. Bu hesap için henüz aktif değil.");
         return;
       }
 
@@ -2038,6 +2101,7 @@ const handleFileUpload = async (
             kind,
             courseId: activeCourseId,
             weekIndex,
+            options,
           }),
         });
 
@@ -2155,8 +2219,31 @@ const handleFileUpload = async (
         });
       }
     },
-    [activeCourseId, buildAutomationKey, prefetchMaterialPreview],
+    [activeCourseId, buildAutomationKey, canUseAutomation, prefetchMaterialPreview],
   );
+
+  const submitQuestionAutomation = useCallback(async () => {
+    if (!automationConfigModal.kind) {
+      return;
+    }
+
+    const defaults = QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind];
+    const normalizedCount = Math.max(
+      defaults.min,
+      Math.min(defaults.max, Number(automationConfigModal.count) || defaults.count),
+    );
+
+    setAutomationConfigModal((prev) => ({
+      ...prev,
+      isOpen: false,
+      count: normalizedCount,
+    }));
+
+    await runAutomation(automationConfigModal.kind, automationConfigModal.weekIndex, {
+      count: normalizedCount,
+      difficulty: automationConfigModal.difficulty,
+    });
+  }, [automationConfigModal, runAutomation]);
 
   const sendMessage = async () => {
     if (!input.trim() || loading) {
@@ -3202,25 +3289,70 @@ const handleFileUpload = async (
                     </div>
                     <div style={{ color: "#374151", fontSize: 13 }}>{user.email}</div>
                     <div>
-                      <span
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          padding: "5px 10px",
-                          borderRadius: 999,
-                          background: user.role === "admin" ? "#dbeafe" : "#f3f4f6",
-                          color: user.role === "admin" ? "#1d4ed8" : "#4b5563",
-                          fontSize: 12,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {user.role === "admin" ? "Admin" : "Öğrenci"}
-                      </span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "5px 10px",
+                            borderRadius: 999,
+                            background: user.role === "admin" ? "#dbeafe" : "#f3f4f6",
+                            color: user.role === "admin" ? "#1d4ed8" : "#4b5563",
+                            fontSize: 12,
+                            fontWeight: 700,
+                            width: "fit-content",
+                          }}
+                        >
+                          {user.role === "admin" ? "Admin" : "Öğrenci"}
+                        </span>
+                        <span
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            padding: "5px 10px",
+                            borderRadius: 999,
+                            background: user.ai_pro_enabled ? "#ede9fe" : "#f3f4f6",
+                            color: user.ai_pro_enabled ? "#6d28d9" : "#6b7280",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            width: "fit-content",
+                          }}
+                        >
+                          {user.ai_pro_enabled ? "Pro AI Açık" : "Pro AI Kapalı"}
+                        </span>
+                      </div>
                     </div>
                     <div style={{ fontWeight: 700, color: "#111827" }}>{user.course_count}</div>
                     <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                       {user.role !== "admin" && (
                         <>
+                          <button
+                            onClick={() =>
+                              void handleToggleAutomationProAccess(
+                                user.id,
+                                !user.ai_pro_enabled,
+                              )
+                            }
+                            disabled={proAccessLoadingUserId === user.id}
+                            style={{
+                              border: "none",
+                              borderRadius: 8,
+                              background: user.ai_pro_enabled ? "#fef3c7" : "#dcfce7",
+                              color: user.ai_pro_enabled ? "#b45309" : "#15803d",
+                              padding: "8px 10px",
+                              fontSize: 12,
+                              fontWeight: 700,
+                              cursor:
+                                proAccessLoadingUserId === user.id ? "wait" : "pointer",
+                              opacity: proAccessLoadingUserId === user.id ? 0.7 : 1,
+                            }}
+                          >
+                            {proAccessLoadingUserId === user.id
+                              ? "Güncelleniyor..."
+                              : user.ai_pro_enabled
+                                ? "Pro AI Kapat"
+                                : "Pro AI Aç"}
+                          </button>
                           <button
                             onClick={() => {
                               setResetPasswordUser(user);
@@ -3964,6 +4096,192 @@ const handleFileUpload = async (
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {automationConfigModal.isOpen && automationConfigModal.kind && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15,23,42,0.48)",
+            zIndex: 55,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              maxWidth: 520,
+              background: "#fff",
+              borderRadius: 18,
+              boxShadow: "0 24px 70px rgba(15,23,42,0.22)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "18px 22px",
+                borderBottom: "1px solid #e5e7eb",
+              }}
+            >
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: "#111827" }}>
+                  AI Üretim Ayarları
+                </h3>
+                <p style={{ margin: "6px 0 0", fontSize: 12, color: "#6b7280" }}>
+                  Bu hafta için kaç{" "}
+                  {QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind].label} üretileceğini ve
+                  zorluk seviyesini seç.
+                </p>
+              </div>
+              <button
+                onClick={() =>
+                  setAutomationConfigModal((prev) => ({ ...prev, isOpen: false }))
+                }
+                style={{ background: "none", border: "none", cursor: "pointer" }}
+              >
+                <X size={18} color="#6b7280" />
+              </button>
+            </div>
+
+            <div style={{ padding: 22, display: "flex", flexDirection: "column", gap: 20 }}>
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: "#374151",
+                    marginBottom: 8,
+                  }}
+                >
+                  Adet
+                </label>
+                <input
+                  type="number"
+                  min={QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind].min}
+                  max={QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind].max}
+                  value={automationConfigModal.count}
+                  onChange={(event) =>
+                    setAutomationConfigModal((prev) => ({
+                      ...prev,
+                      count: Number(event.target.value) || 0,
+                    }))
+                  }
+                  style={{
+                    width: "100%",
+                    padding: "11px 12px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: 10,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+                <p style={{ margin: "8px 0 0", fontSize: 11, color: "#9ca3af" }}>
+                  Önerilen aralık: {QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind].min} -{" "}
+                  {QUESTION_AUTOMATION_DEFAULTS[automationConfigModal.kind].max}
+                </p>
+              </div>
+
+              <div>
+                <label
+                  style={{
+                    display: "block",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    color: "#374151",
+                    marginBottom: 8,
+                  }}
+                >
+                  Zorluk
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {(Object.keys(AUTOMATION_DIFFICULTY_LABELS) as AutomationDifficulty[]).map(
+                    (difficulty) => {
+                      const active = automationConfigModal.difficulty === difficulty;
+                      return (
+                        <button
+                          key={difficulty}
+                          onClick={() =>
+                            setAutomationConfigModal((prev) => ({ ...prev, difficulty }))
+                          }
+                          style={{
+                            flex: 1,
+                            padding: "10px 0",
+                            borderRadius: 10,
+                            border: active ? "1px solid #2563eb" : "1px solid #d1d5db",
+                            background: active ? "#eff6ff" : "#fff",
+                            color: active ? "#1d4ed8" : "#374151",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {AUTOMATION_DIFFICULTY_LABELS[difficulty]}
+                        </button>
+                      );
+                    },
+                  )}
+                </div>
+              </div>
+
+              <div
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  background: "#f8fafc",
+                  border: "1px solid #e5e7eb",
+                  fontSize: 12,
+                  color: "#475569",
+                  lineHeight: 1.55,
+                }}
+              >
+                AI, yüklediğin PDF’e göre bu ayarlara uygun bir üretim yapacak. İstersen daha sonra
+                yeniden üretip farklı adet veya zorluk deneyebilirsin.
+              </div>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  onClick={() =>
+                    setAutomationConfigModal((prev) => ({ ...prev, isOpen: false }))
+                  }
+                  style={{
+                    flex: 1,
+                    padding: "11px 0",
+                    borderRadius: 10,
+                    border: "1px solid #d1d5db",
+                    background: "#fff",
+                    color: "#374151",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  İptal
+                </button>
+                <button
+                  onClick={() => void submitQuestionAutomation()}
+                  style={{
+                    flex: 1,
+                    padding: "11px 0",
+                    borderRadius: 10,
+                    border: "none",
+                    background: "#2563eb",
+                    color: "#fff",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Üretimi Başlat
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -5147,9 +5465,11 @@ const handleFileUpload = async (
                       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                         <button
                           onClick={() => void runAutomation("audio_summary", index)}
-                          disabled={!hasPdfMaterial || audioAutomationLoading}
+                          disabled={!hasPdfMaterial || audioAutomationLoading || !canUseAutomation}
                           title={
-                            hasPdfMaterial
+                            !canUseAutomation
+                              ? "Bu özellik Pro plana dahildir. Admin hesabı veya admin izni gerekir."
+                              : hasPdfMaterial
                               ? "Yüklediğin PDF'den AI ile sesli özet üret"
                               : "Önce bu hafta için bir PDF yükle"
                           }
@@ -5158,12 +5478,19 @@ const handleFileUpload = async (
                             alignItems: "center",
                             gap: 6,
                             padding: "8px 14px",
-                            background: hasPdfMaterial ? "#eff6ff" : "#f3f4f6",
-                            color: hasPdfMaterial ? "#1d4ed8" : "#9ca3af",
-                            border: hasPdfMaterial ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
+                            background:
+                              hasPdfMaterial && canUseAutomation ? "#eff6ff" : "#f3f4f6",
+                            color:
+                              hasPdfMaterial && canUseAutomation ? "#1d4ed8" : "#9ca3af",
+                            border:
+                              hasPdfMaterial && canUseAutomation
+                                ? "1px solid #bfdbfe"
+                                : "1px solid #e5e7eb",
                             borderRadius: 999,
                             cursor:
-                              !hasPdfMaterial || audioAutomationLoading ? "not-allowed" : "pointer",
+                              !hasPdfMaterial || audioAutomationLoading || !canUseAutomation
+                                ? "not-allowed"
+                                : "pointer",
                             fontWeight: 600,
                             fontSize: 12,
                             opacity: audioAutomationLoading ? 0.75 : 1,
@@ -5171,13 +5498,21 @@ const handleFileUpload = async (
                         >
                           <Sparkles size={13} />
                           <Headphones size={13} />
-                          {audioAutomationLoading ? "Sesli özet üretiliyor..." : "Sesli Özet Üret"}
+                          {audioAutomationLoading
+                            ? "Sesli özet üretiliyor..."
+                            : canUseAutomation
+                              ? "Sesli Özet Üret"
+                              : "Sesli Özet (Pro)"}
                         </button>
                         <button
                           onClick={() => void runAutomation("infographic", index)}
-                          disabled={!hasPdfMaterial || infographicAutomationLoading}
+                          disabled={
+                            !hasPdfMaterial || infographicAutomationLoading || !canUseAutomation
+                          }
                           title={
-                            hasPdfMaterial
+                            !canUseAutomation
+                              ? "Bu özellik Pro plana dahildir. Admin hesabı veya admin izni gerekir."
+                              : hasPdfMaterial
                               ? "Yüklediğin PDF'den AI ile PNG infografik üret"
                               : "Önce bu hafta için bir PDF yükle"
                           }
@@ -5186,12 +5521,19 @@ const handleFileUpload = async (
                             alignItems: "center",
                             gap: 6,
                             padding: "8px 14px",
-                            background: hasPdfMaterial ? "#fff7ed" : "#f3f4f6",
-                            color: hasPdfMaterial ? "#c2410c" : "#9ca3af",
-                            border: hasPdfMaterial ? "1px solid #fdba74" : "1px solid #e5e7eb",
+                            background:
+                              hasPdfMaterial && canUseAutomation ? "#fff7ed" : "#f3f4f6",
+                            color:
+                              hasPdfMaterial && canUseAutomation ? "#c2410c" : "#9ca3af",
+                            border:
+                              hasPdfMaterial && canUseAutomation
+                                ? "1px solid #fdba74"
+                                : "1px solid #e5e7eb",
                             borderRadius: 999,
                             cursor:
-                              !hasPdfMaterial || infographicAutomationLoading
+                              !hasPdfMaterial ||
+                              infographicAutomationLoading ||
+                              !canUseAutomation
                                 ? "not-allowed"
                                 : "pointer",
                             fontWeight: 600,
@@ -5203,12 +5545,19 @@ const handleFileUpload = async (
                           <ImageIcon size={13} />
                           {infographicAutomationLoading
                             ? "İnfografik üretiliyor..."
-                            : "İnfografik Üret"}
+                            : canUseAutomation
+                              ? "İnfografik Üret"
+                              : "İnfografik (Pro)"}
                         </button>
                       </div>
                       <p style={{ margin: "10px 0 0", fontSize: 12, color: "#9ca3af" }}>
                         PDF yüklendiğinde bu haftaya özel sesli özet ve PNG infografik otomatik üretilebilir.
                       </p>
+                      {!canUseAutomation && (
+                        <p style={{ margin: "6px 0 0", fontSize: 12, color: "#9ca3af" }}>
+                          Bu AI üretim araçları Pro özelliğidir. Erişim için admin onayı gerekir.
+                        </p>
+                      )}
                     </div>
                   );
                 })}
@@ -5491,9 +5840,12 @@ const handleFileUpload = async (
                       />
                     </label>
                     <button
-                      onClick={() => void runAutomation("flashcards", examView.weekIndex)}
+                      onClick={() =>
+                        openQuestionAutomationModal("flashcards", examView.weekIndex)
+                      }
                       disabled={
                         !materials[examView.weekIndex]?.pdf ||
+                        !canUseAutomation ||
                         Boolean(
                           automationLoading[
                             buildAutomationKey("flashcards", examView.weekIndex)
@@ -5501,7 +5853,9 @@ const handleFileUpload = async (
                         )
                       }
                       title={
-                        materials[examView.weekIndex]?.pdf
+                        !canUseAutomation
+                          ? "Bu özellik Pro plana dahildir. Admin hesabı veya admin izni gerekir."
+                          : materials[examView.weekIndex]?.pdf
                           ? "Bu haftanın PDF materyalinden AI ile bilgi kartı üret"
                           : "Önce bu hafta için bir PDF yükle"
                       }
@@ -5510,14 +5864,21 @@ const handleFileUpload = async (
                         alignItems: "center",
                         gap: 6,
                         padding: "8px 16px",
-                        background: materials[examView.weekIndex]?.pdf ? "#eff6ff" : "#f3f4f6",
-                        color: materials[examView.weekIndex]?.pdf ? "#1d4ed8" : "#9ca3af",
-                        border: materials[examView.weekIndex]?.pdf
+                        background:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#eff6ff"
+                            : "#f3f4f6",
+                        color:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#1d4ed8"
+                            : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf && canUseAutomation
                           ? "1px solid #bfdbfe"
                           : "1px solid #e5e7eb",
                         borderRadius: 8,
                         cursor:
                           !materials[examView.weekIndex]?.pdf ||
+                          !canUseAutomation ||
                           Boolean(
                             automationLoading[
                               buildAutomationKey("flashcards", examView.weekIndex)
@@ -5531,7 +5892,9 @@ const handleFileUpload = async (
                       <Sparkles size={14} />
                       {automationLoading[buildAutomationKey("flashcards", examView.weekIndex)]
                         ? "Üretiliyor..."
-                        : "AI ile Üret"}
+                        : canUseAutomation
+                          ? "AI ile Üret"
+                          : "AI ile Üret (Pro)"}
                     </button>
                     {flashcards[examView.weekIndex]?.length > 0 && (
                       <button
@@ -5696,9 +6059,12 @@ const handleFileUpload = async (
                       />
                     </label>
                     <button
-                      onClick={() => void runAutomation("test_questions", examView.weekIndex)}
+                      onClick={() =>
+                        openQuestionAutomationModal("test_questions", examView.weekIndex)
+                      }
                       disabled={
                         !materials[examView.weekIndex]?.pdf ||
+                        !canUseAutomation ||
                         Boolean(
                           automationLoading[
                             buildAutomationKey("test_questions", examView.weekIndex)
@@ -5706,7 +6072,9 @@ const handleFileUpload = async (
                         )
                       }
                       title={
-                        materials[examView.weekIndex]?.pdf
+                        !canUseAutomation
+                          ? "Bu özellik Pro plana dahildir. Admin hesabı veya admin izni gerekir."
+                          : materials[examView.weekIndex]?.pdf
                           ? "Bu haftanın PDF materyalinden AI ile test sorusu üret"
                           : "Önce bu hafta için bir PDF yükle"
                       }
@@ -5715,14 +6083,21 @@ const handleFileUpload = async (
                         alignItems: "center",
                         gap: 6,
                         padding: "8px 16px",
-                        background: materials[examView.weekIndex]?.pdf ? "#ecfdf5" : "#f3f4f6",
-                        color: materials[examView.weekIndex]?.pdf ? "#047857" : "#9ca3af",
-                        border: materials[examView.weekIndex]?.pdf
+                        background:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#ecfdf5"
+                            : "#f3f4f6",
+                        color:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#047857"
+                            : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf && canUseAutomation
                           ? "1px solid #6ee7b7"
                           : "1px solid #e5e7eb",
                         borderRadius: 8,
                         cursor:
                           !materials[examView.weekIndex]?.pdf ||
+                          !canUseAutomation ||
                           Boolean(
                             automationLoading[
                               buildAutomationKey("test_questions", examView.weekIndex)
@@ -5736,7 +6111,9 @@ const handleFileUpload = async (
                       <Sparkles size={14} />
                       {automationLoading[buildAutomationKey("test_questions", examView.weekIndex)]
                         ? "Üretiliyor..."
-                        : "AI ile Üret"}
+                        : canUseAutomation
+                          ? "AI ile Üret"
+                          : "AI ile Üret (Pro)"}
                     </button>
                     {testQuestions[examView.weekIndex]?.length > 0 && (
                       <button
@@ -5928,10 +6305,14 @@ const handleFileUpload = async (
                     </label>
                     <button
                       onClick={() =>
-                        void runAutomation("open_ended_questions", examView.weekIndex)
+                        openQuestionAutomationModal(
+                          "open_ended_questions",
+                          examView.weekIndex,
+                        )
                       }
                       disabled={
                         !materials[examView.weekIndex]?.pdf ||
+                        !canUseAutomation ||
                         Boolean(
                           automationLoading[
                             buildAutomationKey("open_ended_questions", examView.weekIndex)
@@ -5939,7 +6320,9 @@ const handleFileUpload = async (
                         )
                       }
                       title={
-                        materials[examView.weekIndex]?.pdf
+                        !canUseAutomation
+                          ? "Bu özellik Pro plana dahildir. Admin hesabı veya admin izni gerekir."
+                          : materials[examView.weekIndex]?.pdf
                           ? "Bu haftanın PDF materyalinden AI ile açık uçlu soru üret"
                           : "Önce bu hafta için bir PDF yükle"
                       }
@@ -5948,14 +6331,21 @@ const handleFileUpload = async (
                         alignItems: "center",
                         gap: 6,
                         padding: "8px 16px",
-                        background: materials[examView.weekIndex]?.pdf ? "#f5f3ff" : "#f3f4f6",
-                        color: materials[examView.weekIndex]?.pdf ? "#6d28d9" : "#9ca3af",
-                        border: materials[examView.weekIndex]?.pdf
+                        background:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#f5f3ff"
+                            : "#f3f4f6",
+                        color:
+                          materials[examView.weekIndex]?.pdf && canUseAutomation
+                            ? "#6d28d9"
+                            : "#9ca3af",
+                        border: materials[examView.weekIndex]?.pdf && canUseAutomation
                           ? "1px solid #d8b4fe"
                           : "1px solid #e5e7eb",
                         borderRadius: 8,
                         cursor:
                           !materials[examView.weekIndex]?.pdf ||
+                          !canUseAutomation ||
                           Boolean(
                             automationLoading[
                               buildAutomationKey(
@@ -5974,7 +6364,9 @@ const handleFileUpload = async (
                         buildAutomationKey("open_ended_questions", examView.weekIndex)
                       ]
                         ? "Üretiliyor..."
-                        : "AI ile Üret"}
+                        : canUseAutomation
+                          ? "AI ile Üret"
+                          : "AI ile Üret (Pro)"}
                     </button>
                   </div>
                   <p style={{ fontSize: 11, color: "#9ca3af", marginBottom: 16 }}>

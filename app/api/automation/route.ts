@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { AuthError, requireUser } from "@/lib/server/auth";
+import { AuthError, ensureAutomationAccess, requireUser } from "@/lib/server/auth";
 import {
   generateAutomationArtifact,
+  type AutomationDifficulty,
   type AutomationKind,
 } from "@/lib/server/automation";
 
@@ -10,10 +11,15 @@ export const runtime = "nodejs";
 export async function POST(request: NextRequest) {
   try {
     const auth = await requireUser(request);
+    ensureAutomationAccess(auth.user);
     const body = (await request.json()) as {
       kind?: AutomationKind;
       courseId?: number;
       weekIndex?: number;
+      options?: {
+        count?: number;
+        difficulty?: AutomationDifficulty;
+      };
     };
 
     if (!body.kind || !Number.isInteger(body.courseId) || !Number.isInteger(body.weekIndex)) {
@@ -26,6 +32,7 @@ export async function POST(request: NextRequest) {
       weekIndex: Number(body.weekIndex),
       userId: auth.user.id,
       client: auth.supabase,
+      options: body.options,
     });
 
     const response = NextResponse.json({ data });

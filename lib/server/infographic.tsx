@@ -51,6 +51,8 @@ function normalizeSections(sections: GeneratedInfographicSection[]) {
 
 export async function renderInfographicPng(params: RenderParams) {
   const sections = normalizeSections(params.spec.sections);
+  // next/og does not support CSS calc() here, so we keep the card width explicit.
+  const sectionCardWidth = 619;
   const response = new ImageResponse(
     (
       <div
@@ -203,7 +205,7 @@ export async function renderInfographicPng(params: RenderParams) {
               style={{
                 display: "flex",
                 flexDirection: "column",
-                width: "calc(50% - 9px)",
+                width: sectionCardWidth,
                 minHeight: "205px",
                 borderRadius: "24px",
                 background: "#ffffff",

@@ -22,6 +22,13 @@ export type AutomationKind =
   | "test_questions"
   | "open_ended_questions";
 
+export type AutomationDifficulty = "easy" | "medium" | "hard";
+
+export type AutomationOptions = {
+  count?: number;
+  difficulty?: AutomationDifficulty;
+};
+
 type CourseRow = {
   id: number;
   name: string;
@@ -116,22 +123,28 @@ const GEMINI_STRUCTURED_MODEL =
 const GEMINI_TTS_MODEL =
   process.env.GEMINI_TTS_MODEL ?? "gemini-2.5-flash-preview-tts";
 const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE ?? "Achird";
+const AUDIO_NARRATION_SECTION_COUNT = 8;
 
 const SUMMARY_SCHEMA = {
   type: "object",
   properties: {
     summary_title: { type: "string" },
     summary_text: { type: "string" },
-    narration: { type: "string" },
+    narration_sections: {
+      type: "array",
+      minItems: AUDIO_NARRATION_SECTION_COUNT,
+      maxItems: AUDIO_NARRATION_SECTION_COUNT,
+      items: { type: "string" },
+    },
     key_points: {
       type: "array",
       items: { type: "string" },
-      minItems: 4,
-      maxItems: 4,
+      minItems: 6,
+      maxItems: 6,
     },
     takeaway: { type: "string" },
   },
-  required: ["summary_title", "summary_text", "narration", "key_points", "takeaway"],
+  required: ["summary_title", "summary_text", "narration_sections", "key_points", "takeaway"],
   additionalProperties: false,
 } as const;
 
@@ -150,7 +163,7 @@ const INFOGRAPHIC_SCHEMA = {
           heading: { type: "string" },
           bullets: {
             type: "array",
-            minItems: 2,
+            minItems: 3,
             maxItems: 3,
             items: { type: "string" },
           },
@@ -165,84 +178,164 @@ const INFOGRAPHIC_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const FLASHCARD_SCHEMA = {
-  type: "object",
-  properties: {
-    items: {
-      type: "array",
-      minItems: 8,
-      maxItems: 8,
+function buildFlashcardSchema(count: number) {
+  return {
+    type: "object",
+    properties: {
       items: {
-        type: "object",
-        properties: {
-          front: { type: "string" },
-          back: { type: "string" },
-        },
-        required: ["front", "back"],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ["items"],
-  additionalProperties: false,
-} as const;
-
-const TEST_SCHEMA = {
-  type: "object",
-  properties: {
-    items: {
-      type: "array",
-      minItems: 6,
-      maxItems: 6,
-      items: {
-        type: "object",
-        properties: {
-          question: { type: "string" },
-          options: {
-            type: "array",
-            minItems: 4,
-            maxItems: 4,
-            items: { type: "string" },
+        type: "array",
+        minItems: count,
+        maxItems: count,
+        items: {
+          type: "object",
+          properties: {
+            front: { type: "string" },
+            back: { type: "string" },
           },
-          correct_index: {
-            type: "integer",
-            minimum: 0,
-            maximum: 3,
-          },
+          required: ["front", "back"],
+          additionalProperties: false,
         },
-        required: ["question", "options", "correct_index"],
-        additionalProperties: false,
       },
     },
-  },
-  required: ["items"],
-  additionalProperties: false,
-} as const;
+    required: ["items"],
+    additionalProperties: false,
+  } as const;
+}
 
-const OPEN_ENDED_SCHEMA = {
-  type: "object",
-  properties: {
-    items: {
-      type: "array",
-      minItems: 4,
-      maxItems: 4,
+function buildTestSchema(count: number) {
+  return {
+    type: "object",
+    properties: {
       items: {
-        type: "object",
-        properties: {
-          question: { type: "string" },
-          answer: { type: "string" },
+        type: "array",
+        minItems: count,
+        maxItems: count,
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            options: {
+              type: "array",
+              minItems: 4,
+              maxItems: 4,
+              items: { type: "string" },
+            },
+            correct_index: {
+              type: "integer",
+              minimum: 0,
+              maximum: 3,
+            },
+          },
+          required: ["question", "options", "correct_index"],
+          additionalProperties: false,
         },
-        required: ["question", "answer"],
-        additionalProperties: false,
       },
     },
-  },
-  required: ["items"],
-  additionalProperties: false,
-} as const;
+    required: ["items"],
+    additionalProperties: false,
+  } as const;
+}
+
+function buildOpenEndedSchema(count: number) {
+  return {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        minItems: count,
+        maxItems: count,
+        items: {
+          type: "object",
+          properties: {
+            question: { type: "string" },
+            answer: { type: "string" },
+          },
+          required: ["question", "answer"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["items"],
+    additionalProperties: false,
+  } as const;
+}
 
 function sanitizeStorageSegment(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
+}
+
+function buildStudyIntentPrompt(courseName: string, weekTitle: string) {
+  return [
+    `${courseName} dersinden "${weekTitle}" konusunda sınavım var.`,
+    "Ders kitabından bu konuyu anlatan kısmı sana yükledim.",
+    "Sadece yüklediğim metne dayanarak, konunun tamamını kapsayan, öğrencinin tekrar yapmasına gerçekten yardımcı olacak bir çıktı üret.",
+    "Gereksiz genel geçer cümlelerden kaçın; önemli bilgi, kavram, ayrım, şart, süreç ve sınavda karışabilecek noktaları öne çıkar.",
+  ].join(" ");
+}
+
+function clampCount(kind: AutomationKind, rawCount: number | null | undefined) {
+  const count = Number(rawCount ?? 0);
+
+  if (kind === "flashcards") {
+    return Math.max(4, Math.min(30, Number.isFinite(count) ? Math.round(count) : 14));
+  }
+
+  if (kind === "test_questions") {
+    return Math.max(4, Math.min(24, Number.isFinite(count) ? Math.round(count) : 12));
+  }
+
+  if (kind === "open_ended_questions") {
+    return Math.max(2, Math.min(12, Number.isFinite(count) ? Math.round(count) : 6));
+  }
+
+  return 0;
+}
+
+function normalizeDifficulty(value: string | null | undefined): AutomationDifficulty {
+  if (value === "easy" || value === "hard") {
+    return value;
+  }
+
+  return "medium";
+}
+
+function buildDifficultyInstruction(
+  kind: Extract<AutomationKind, "flashcards" | "test_questions" | "open_ended_questions">,
+  difficulty: AutomationDifficulty,
+) {
+  if (kind === "flashcards") {
+    if (difficulty === "easy") {
+      return "Bilgi kartları kolay düzeyde olsun; temel tanım, ilke, unsur ve doğrudan hatırlama gerektiren noktaları öne çıkar.";
+    }
+
+    if (difficulty === "hard") {
+      return "Bilgi kartları zor düzeyde olsun; karıştırılabilecek ayrımlar, istisnalar, şartlar ve analitik karşılaştırmalar ağırlıklı olsun.";
+    }
+
+    return "Bilgi kartları orta düzeyde olsun; hem temel bilgiyi hem de karşılaştırma ve ayırt etme becerisini dengeli ölçsün.";
+  }
+
+  if (kind === "test_questions") {
+    if (difficulty === "easy") {
+      return "Test soruları kolay düzeyde olsun; temel kavramlar, doğrudan bilgi ve çekirdek ilkeler üzerinde yoğunlaşsın.";
+    }
+
+    if (difficulty === "hard") {
+      return "Test soruları zor düzeyde olsun; ince ayrım, çok benzer seçenekler arasında doğru tercihi yapma, yorum ve uygulama becerisi istesin.";
+    }
+
+    return "Test soruları orta düzeyde olsun; temel bilgi ile yorumlama ve karşılaştırma becerisini dengeli biçimde ölçsün.";
+  }
+
+  if (difficulty === "easy") {
+    return "Açık uçlu sorular kolay düzeyde olsun; öğrencinin temel kavramları açıklamasını ve doğrudan bilgiyi ifade etmesini beklesin.";
+  }
+
+  if (difficulty === "hard") {
+    return "Açık uçlu sorular zor düzeyde olsun; karşılaştırma, analiz, yorum, şartların birlikte değerlendirilmesi ve sonuç çıkarma becerisi gerektirsin.";
+  }
+
+  return "Açık uçlu sorular orta düzeyde olsun; açıklama ile birlikte yorum ve karşılaştırma gerektirsin.";
 }
 
 function normalizeText(value: string) {
@@ -422,7 +515,55 @@ async function generateGeminiJson<T>(params: {
   }
 }
 
-async function generateSpeechWav(params: {
+function chunkTextForSpeech(text: string, maxChars = 2600) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  if (normalized.length <= maxChars) {
+    return [normalized];
+  }
+
+  const sentences = normalized.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    const candidate = current ? `${current} ${sentence}` : sentence;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+    }
+
+    if (sentence.length <= maxChars) {
+      current = sentence;
+      continue;
+    }
+
+    let offset = 0;
+    while (offset < sentence.length) {
+      const slice = sentence.slice(offset, offset + maxChars).trim();
+      if (slice) {
+        chunks.push(slice);
+      }
+      offset += maxChars;
+    }
+    current = "";
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+async function generateSpeechPcm(params: {
   apiKey: string;
   text: string;
 }) {
@@ -463,8 +604,29 @@ async function generateSpeechWav(params: {
     throw new Error("Gemini ses çıktısı döndürmedi.");
   }
 
-  const pcmBuffer = Buffer.from(inlineData.data, "base64");
-  return pcmToWav(pcmBuffer);
+  return Buffer.from(inlineData.data, "base64");
+}
+
+async function generateSpeechWav(params: {
+  apiKey: string;
+  segments: string[];
+}) {
+  const chunks = params.segments.flatMap((segment) => chunkTextForSpeech(segment));
+  if (chunks.length === 0) {
+    throw new Error("Ses üretimi için anlatım metni oluşturulamadı.");
+  }
+
+  const pcmBuffers: Buffer[] = [];
+  for (const chunk of chunks) {
+    pcmBuffers.push(
+      await generateSpeechPcm({
+        apiKey: params.apiKey,
+        text: chunk,
+      }),
+    );
+  }
+
+  return pcmToWav(Buffer.concat(pcmBuffers));
 }
 
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16) {
@@ -603,7 +765,9 @@ async function upsertGeneratedMaterial(params: {
     fileName: params.fileName,
   });
 
-  const file = new File([params.buffer], params.fileName, { type: params.mimeType });
+  const file = new File([new Uint8Array(params.buffer)], params.fileName, {
+    type: params.mimeType,
+  });
   const upload = await storeUploadedFile({
     client: params.client,
     bucket: MATERIAL_STORAGE_BUCKET,
@@ -676,7 +840,7 @@ async function generateAudioSummary(params: {
   const summary = await generateGeminiJson<{
     summary_title: string;
     summary_text: string;
-    narration: string;
+    narration_sections: string[];
     key_points: string[];
     takeaway: string;
   }>({
@@ -684,24 +848,28 @@ async function generateAudioSummary(params: {
     file: params.pdfFile,
     schema: SUMMARY_SCHEMA as unknown as Record<string, unknown>,
     prompt: [
-      `${params.course.name} dersinin "${params.week.title}" başlıklı haftası için yüklenen PDF'yi analiz et.`,
-      "Türkçe, pedagojik ve anlaşılır bir sesli özet hazırla.",
+      buildStudyIntentPrompt(params.course.name, params.week.title),
+      "Senden oldukça detaylı, hacimli ve pedagojik bir sesli konu anlatımı istiyorum.",
+      "Bu anlatım öğrencinin sınav öncesi yalnızca dinleyerek konuyu tekrar etmesine yardımcı olmalı.",
+      "Bölümdeki her önemli bilgiyi atlamadan, öğrencinin sadece bu anlatımı dinleyerek konuyu büyük ölçüde kavrayabileceği bir akış kur.",
       "summary_title: en fazla 8 kelime olsun.",
-      "summary_text: 3 kısa paragrafta, toplam yaklaşık 120-170 kelime olsun.",
-      "narration: seslendirilmeye uygun, akıcı ve doğal bir metin olsun; madde işareti kullanma.",
-      "key_points: 4 kısa madde ver.",
-      "takeaway: öğrencinin aklında kalması gereken tek cümleyi yaz.",
+      "summary_text: 4 veya 5 paragrafta, toplam yaklaşık 220-320 kelime olsun.",
+      `narration_sections: tam ${AUDIO_NARRATION_SECTION_COUNT} bölüm üret; her bölüm tek bir string olsun; her bölüm seslendirilmeye uygun, akıcı, doğal ve ayrıntılı bir anlatım içersin; madde işareti kullanma; her bölüm yaklaşık 350-430 kelime olsun; toplam anlatım en az yaklaşık 20 dakikalık bir ders tekrarı hissi vermeli.`,
+      "key_points: sınav öncesi tekrar için 6 kısa ve yüksek değerli hatırlatma maddesi ver.",
+      "takeaway: öğrencinin aklında kalması gereken en önemli ana fikri tek ama güçlü bir cümleyle yaz.",
       "Yalnızca PDF'deki bilgiye dayan. Emin olmadığın bilgi ekleme.",
     ].join("\n"),
   });
 
   const audioBuffer = await generateSpeechWav({
     apiKey: params.apiKey,
-    text: [
-      `${params.week.title} için sesli özet.`,
-      summary.narration,
+    segments: [
+      `${params.week.title} için sesli özet başlıyor.`,
+      ...summary.narration_sections.map(
+        (section, index) => `Bölüm ${index + 1}. ${section}`,
+      ),
       `Ana çıkarım: ${summary.takeaway}`,
-    ].join(" "),
+    ],
   });
 
   const generated = await upsertGeneratedMaterial({
@@ -738,12 +906,14 @@ async function generateInfographic(params: {
     file: params.pdfFile,
     schema: INFOGRAPHIC_SCHEMA as unknown as Record<string, unknown>,
     prompt: [
-      `${params.course.name} dersinin "${params.week.title}" haftası için öğrencinin hızlı tekrar yapabileceği bir Türkçe infografik planı hazırla.`,
+      buildStudyIntentPrompt(params.course.name, params.week.title),
+      "Senden tek infografik üzerinden tüm konuyu tekrar ettirecek kadar dolu, ayrıntılı ama görsel olarak okunabilir bir Türkçe infografik planı istiyorum.",
       "headline kısa ve güçlü olsun.",
-      "subtitle en fazla 2 cümle olsun.",
-      "4 bölüm üret; her bölümde 2 veya 3 kısa madde olsun.",
+      "subtitle en fazla 2 cümle olsun ve konunun kapsamını özetlesin.",
+      "4 bölüm üret; her bölümde tam 3 madde olsun.",
+      "Bu 4 bölüm birlikte konunun tamamını kapsasın; temel kavramlar, ayrımlar, mekanizmalar, şartlar ve sınavda karışabilecek noktalar görünür olsun.",
+      "Maddeler kısa ama bilgi yoğun olsun; tekrar amaçlı bakıldığında hatırlatıcı değer taşısın.",
       "takeaway tek cümlelik güçlü bir özet olsun.",
-      "Metinler sıkışmayacak kadar kısa, fakat kavramsal olarak net olsun.",
       "Sadece PDF'deki içeriğe dayan.",
     ].join("\n"),
   });
@@ -822,18 +992,24 @@ async function generateFlashcards(params: {
   course: CourseRow;
   week: WeekRow;
   client: SupabaseClient;
+  options?: AutomationOptions;
 }) {
+  const count = clampCount("flashcards", params.options?.count);
+  const difficulty = normalizeDifficulty(params.options?.difficulty);
   const generated = await generateGeminiJson<{
     items: Array<{ front: string; back: string }>;
   }>({
     apiKey: params.apiKey,
     file: params.pdfFile,
-    schema: FLASHCARD_SCHEMA as unknown as Record<string, unknown>,
+    schema: buildFlashcardSchema(count) as unknown as Record<string, unknown>,
     prompt: [
-      `${params.course.name} dersinin "${params.week.title}" haftası için 8 adet bilgi kartı üret.`,
-      "Kartlar öğrencinin tekrar yapmasına uygun olsun.",
-      "Tanım, karşılaştırma, mekanizma ve örnek türlerinde dengeli kartlar ver.",
-      "front kısa olsun; back açıklayıcı ama 3 cümleyi geçmesin.",
+      buildStudyIntentPrompt(params.course.name, params.week.title),
+      `Senden oldukça detaylı ve hacimli ama gereksiz olmayan tam ${count} adet bilgi kartı istiyorum.`,
+      buildDifficultyInstruction("flashcards", difficulty),
+      "Kartlar öğrencinin konuyu hızlıca öğrenmesine ve pekiştirmesine yardım etsin.",
+      "Tanım, ilke, unsur, şart, karşılaştırma, mekanizma, sonuç ve örnek türlerinde dengeli dağılım kur.",
+      "front kısa ve net olsun; back açıklayıcı olsun ama 4 cümleyi geçmesin.",
+      "Birbirini tekrar eden veya sadece farklı kelimelerle aynı şeyi soran kartlar üretme.",
       "Sadece PDF'deki bilgiye dayan.",
     ].join("\n"),
   });
@@ -886,18 +1062,24 @@ async function generateTestQuestions(params: {
   course: CourseRow;
   week: WeekRow;
   client: SupabaseClient;
+  options?: AutomationOptions;
 }) {
+  const count = clampCount("test_questions", params.options?.count);
+  const difficulty = normalizeDifficulty(params.options?.difficulty);
   const generated = await generateGeminiJson<{
     items: Array<{ question: string; options: string[]; correct_index: number }>;
   }>({
     apiKey: params.apiKey,
     file: params.pdfFile,
-    schema: TEST_SCHEMA as unknown as Record<string, unknown>,
+    schema: buildTestSchema(count) as unknown as Record<string, unknown>,
     prompt: [
-      `${params.course.name} dersinin "${params.week.title}" haftası için 6 çoktan seçmeli soru üret.`,
+      buildStudyIntentPrompt(params.course.name, params.week.title),
+      `Senden ${params.course.name} dersinin "${params.week.title}" konusu için öğrenmeyi pekiştirecek ve alt başlıkların tamamını kapsayacak tam ${count} çoktan seçmeli soru istiyorum.`,
+      buildDifficultyInstruction("test_questions", difficulty),
       "Her soruda 4 seçenek olsun ve yalnızca 1 doğru cevap bulunsun.",
-      "Sorular ezberden çok kavrayışı ölçsün.",
-      "Seçenekler açık ve birbiriyle tutarlı olsun; belirsiz tuzaklar kurma.",
+      "Soruların bir kısmı temel kavrayışı, bir kısmı ayrım yapma becerisini, bir kısmı da yorumlama becerisini ölçsün.",
+      "Seçenekler açık, tutarlı ve öğretici olsun; yapay veya anlamsız çeldirici kurma.",
+      "Sorular konu kapsamını dengeli dağıtsın; aynı alt noktayı tekrar tekrar sorma.",
       "correct_index değerini 0 ile 3 arasında ver.",
       "Sadece PDF'deki bilgiye dayan.",
     ].join("\n"),
@@ -963,18 +1145,23 @@ async function generateOpenEndedQuestions(params: {
   course: CourseRow;
   week: WeekRow;
   client: SupabaseClient;
+  options?: AutomationOptions;
 }) {
+  const count = clampCount("open_ended_questions", params.options?.count);
+  const difficulty = normalizeDifficulty(params.options?.difficulty);
   const generated = await generateGeminiJson<{
     items: Array<{ question: string; answer: string }>;
   }>({
     apiKey: params.apiKey,
     file: params.pdfFile,
-    schema: OPEN_ENDED_SCHEMA as unknown as Record<string, unknown>,
+    schema: buildOpenEndedSchema(count) as unknown as Record<string, unknown>,
     prompt: [
-      `${params.course.name} dersinin "${params.week.title}" haftası için 4 açık uçlu soru üret.`,
-      "Sorular yorum, açıklama ve analiz gerektirsin.",
-      "Her soruya 2-4 cümlelik model cevap yaz.",
-      "Sorular birbirini tekrar etmesin.",
+      buildStudyIntentPrompt(params.course.name, params.week.title),
+      `Senden ${params.course.name} dersinin "${params.week.title}" konusu için tam ${count} açık uçlu soru istiyorum.`,
+      buildDifficultyInstruction("open_ended_questions", difficulty),
+      "Sorular açıklama, karşılaştırma, yorum ve analiz gerektirsin.",
+      "Her soruya 3-5 cümlelik model cevap yaz.",
+      "Sorular birlikte konunun farklı yönlerini kapsasın ve birbirini tekrar etmesin.",
       "Sadece PDF'deki bilgiye dayan.",
     ].join("\n"),
   });
@@ -1033,6 +1220,7 @@ export async function generateAutomationArtifact(params: {
   weekIndex: number;
   userId: string;
   client: SupabaseClient;
+  options?: AutomationOptions;
 }) {
   const apiKey = process.env.GEMINI_API_KEY ?? null;
   if (!apiKey) {
@@ -1074,6 +1262,7 @@ export async function generateAutomationArtifact(params: {
         course: context.course,
         week: context.week,
         client: params.client,
+        options: params.options,
       });
     case "test_questions":
       return generateTestQuestions({
@@ -1082,6 +1271,7 @@ export async function generateAutomationArtifact(params: {
         course: context.course,
         week: context.week,
         client: params.client,
+        options: params.options,
       });
     case "open_ended_questions":
       return generateOpenEndedQuestions({
@@ -1090,6 +1280,7 @@ export async function generateAutomationArtifact(params: {
         course: context.course,
         week: context.week,
         client: params.client,
+        options: params.options,
       });
     default:
       throw new Error("Bilinmeyen otomasyon isteği.");

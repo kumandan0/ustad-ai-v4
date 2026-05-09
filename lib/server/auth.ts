@@ -36,6 +36,7 @@ export type SessionUser = {
   name: string;
   email: string;
   role: UserRole;
+  ai_pro_enabled: boolean;
   created_at?: string;
 };
 
@@ -92,6 +93,9 @@ function assertStrongPassword(password: string) {
 }
 
 function buildSessionUser(profile: ProfileRow | null, user: User): SessionUser {
+  const aiProEnabled =
+    profile?.role === "admin" || user.user_metadata?.ai_pro_enabled === true;
+
   return {
     id: user.id,
     name:
@@ -101,6 +105,7 @@ function buildSessionUser(profile: ProfileRow | null, user: User): SessionUser {
       "Kullanıcı",
     email: profile?.email || user.email || "",
     role: profile?.role ?? "student",
+    ai_pro_enabled: aiProEnabled,
     created_at: profile?.created_at,
   };
 }
@@ -204,6 +209,17 @@ export async function requireAdmin(request: NextRequest) {
   }
 
   return context;
+}
+
+export function ensureAutomationAccess(user: SessionUser) {
+  if (user.role === "admin" || user.ai_pro_enabled) {
+    return;
+  }
+
+  throw new AuthError(
+    "AI ile otomatik üretim Pro özelliğidir. Bu hesap için henüz aktif değil.",
+    403,
+  );
 }
 
 export async function registerUser(
@@ -326,13 +342,22 @@ export async function logoutCurrentUser(request: NextRequest) {
 
 export async function listUsersForAdmin(request: NextRequest) {
   const admin = await requireAdmin(request);
-  const [{ data: profiles, error: profilesError }, { data: courses, error: coursesError }] =
+  const serviceClient = createServiceRoleSupabaseClient();
+  const [
+    { data: profiles, error: profilesError },
+    { data: courses, error: coursesError },
+    { data: authUsersData, error: authUsersError },
+  ] =
     await Promise.all([
       admin.supabase
         .from("profiles")
         .select("id,email,full_name,role,created_at")
         .order("created_at", { ascending: true }),
       admin.supabase.from("courses").select("id,user_id"),
+      serviceClient.auth.admin.listUsers({
+        page: 1,
+        perPage: 1000,
+      }),
     ]);
 
   if (profilesError) {
@@ -343,10 +368,19 @@ export async function listUsersForAdmin(request: NextRequest) {
     throw new AuthError("Ders sayıları yüklenemedi.", 500);
   }
 
+  if (authUsersError) {
+    throw new AuthError("Kullanıcı yetkileri yüklenemedi.", 500);
+  }
+
   const courseCounts = new Map<string, number>();
   (courses ?? []).forEach((course) => {
     const key = String(course.user_id);
     courseCounts.set(key, (courseCounts.get(key) ?? 0) + 1);
+  });
+
+  const automationAccessByUserId = new Map<string, boolean>();
+  (authUsersData?.users ?? []).forEach((user) => {
+    automationAccessByUserId.set(user.id, user.user_metadata?.ai_pro_enabled === true);
   });
 
   return (profiles ?? []).map((profile) => ({
@@ -354,6 +388,9 @@ export async function listUsersForAdmin(request: NextRequest) {
     name: String(profile.full_name ?? profile.email ?? "Kullanıcı"),
     email: String(profile.email ?? ""),
     role: (profile.role ?? "student") as UserRole,
+    ai_pro_enabled:
+      (profile.role ?? "student") === "admin" ||
+      automationAccessByUserId.get(String(profile.id)) === true,
     created_at: profile.created_at ?? undefined,
     course_count: courseCounts.get(String(profile.id)) ?? 0,
   })) satisfies AdminUserSummary[];
@@ -487,5 +524,48 @@ export async function deleteUserByAdmin(request: NextRequest, userId: string) {
   const { error } = await serviceClient.auth.admin.deleteUser(userId);
   if (error) {
     throw new AuthError(error.message || "Kullanıcı silinemedi.", 500);
+  }
+}
+
+export async function updateUserAutomationAccess(
+  request: NextRequest,
+  userId: string,
+  enabled: boolean,
+) {
+  const admin = await requireAdmin(request);
+  if (admin.user.id === userId) {
+    throw new AuthError("Admin hesabı için Pro erişim zaten her zaman açıktır.", 400);
+  }
+
+  const serviceClient = createServiceRoleSupabaseClient();
+  const [{ data: authUserData, error: authUserError }, { data: profileData, error: profileError }] =
+    await Promise.all([
+      serviceClient.auth.admin.getUserById(userId),
+      admin.supabase.from("profiles").select("role").eq("id", userId).single(),
+    ]);
+
+  if (authUserError || !authUserData.user) {
+    throw new AuthError(authUserError?.message || "Kullanıcı bulunamadı.", 404);
+  }
+
+  if (profileError || !profileData) {
+    throw new AuthError("Kullanıcı profili bulunamadı.", 404);
+  }
+
+  if ((profileData.role as UserRole) === "admin") {
+    throw new AuthError("Admin kullanıcılar için bu yetki kapatılamaz.", 400);
+  }
+
+  const nextMetadata = {
+    ...(authUserData.user.user_metadata ?? {}),
+    ai_pro_enabled: enabled,
+  };
+
+  const { error } = await serviceClient.auth.admin.updateUserById(userId, {
+    user_metadata: nextMetadata,
+  });
+
+  if (error) {
+    throw new AuthError(error.message || "Pro erişim güncellenemedi.", 500);
   }
 }
