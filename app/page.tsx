@@ -161,7 +161,7 @@ interface AdminInviteSummary {
 const DEFAULT_ASSISTANT_PROMPT = "Sen yardımsever bir öğretmen asistanısın. Türkçe yanıt ver.";
 const ACTIVE_COURSE_STORAGE_KEY = "ustad-ai-active-course-id";
 const BOOTSTRAP_SESSION_KEY_PREFIX = "ustad-ai-bootstrap";
-const BOOTSTRAP_FLOW_VERSION = "v2";
+const BOOTSTRAP_FLOW_VERSION = "v3";
 
 const QUESTION_AUTOMATION_DEFAULTS: Record<
   QuestionAutomationKind,

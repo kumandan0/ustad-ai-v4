@@ -3,6 +3,7 @@ import { AuthError, requireUser } from "@/lib/server/auth";
 import { queryTable } from "@/lib/server/store";
 import { deleteStoredFile, readStoredFile, storeUploadedFile } from "@/lib/server/store";
 import {
+  buildMaterialFileUrl,
   MATERIAL_STORAGE_BUCKET,
   parseMaterialFileUrl,
   type StorageProvider,
@@ -32,12 +33,72 @@ function parseRangeHeader(rangeHeader: string | null, size: number) {
 
 type MaterialAccessRow = {
   id: number;
+  user_id: string;
   course_id: number;
+  week_id: number | null;
+  week_index: number;
+  file_type: "pdf" | "audio" | "infographic";
+  file_name: string;
   file_url: string;
   storage_provider: StorageProvider | null;
   storage_file_id: string | null;
   mime_type: string | null;
 };
+
+function sanitizeStorageSegment(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "file";
+}
+
+async function tryMigrateLocalMaterialToSupabase(params: {
+  supabase: Parameters<typeof queryTable>[0]["client"];
+  material: MaterialAccessRow;
+  contentType: string;
+  buffer: Buffer;
+}) {
+  if (params.material.storage_provider !== "local") {
+    return null;
+  }
+
+  const targetPath = [
+    sanitizeStorageSegment(params.material.user_id),
+    String(params.material.course_id),
+    String(params.material.week_id ?? `week-${params.material.week_index}`),
+    params.material.file_type,
+    `${params.material.id}-${sanitizeStorageSegment(params.material.file_name)}`,
+  ].join("/");
+
+  const { error: uploadError } = await params.supabase.storage
+    .from(MATERIAL_STORAGE_BUCKET)
+    .upload(targetPath, params.buffer, {
+      upsert: true,
+      contentType: params.contentType,
+    });
+
+  if (uploadError) {
+    throw uploadError;
+  }
+
+  const nextFileUrl = buildMaterialFileUrl(MATERIAL_STORAGE_BUCKET, targetPath);
+  const { error: updateError } = await params.supabase
+    .from("materials")
+    .update({
+      file_url: nextFileUrl,
+      mime_type: params.contentType,
+      storage_provider: "supabase",
+      storage_file_id: targetPath,
+    })
+    .eq("id", params.material.id)
+    .eq("user_id", params.material.user_id);
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  return {
+    fileUrl: nextFileUrl,
+    storageFileId: targetPath,
+  };
+}
 
 async function findAuthorizedMaterialForFile(
   client: Parameters<typeof queryTable>[0]["client"],
@@ -143,6 +204,17 @@ export async function GET(request: NextRequest) {
     const size = file.buffer.length;
     const range = parseRangeHeader(request.headers.get("range"), size);
     const contentType = type || material.mime_type || file.contentType;
+
+    if (material.storage_provider === "local") {
+      void tryMigrateLocalMaterialToSupabase({
+        supabase: auth.supabase,
+        material,
+        contentType,
+        buffer: file.buffer,
+      }).catch((migrationError) => {
+        console.error("Local materyal Supabase Storage'a taşınamadı:", migrationError);
+      });
+    }
 
     if (range) {
       const chunk = file.buffer.subarray(range.start, range.end + 1);
