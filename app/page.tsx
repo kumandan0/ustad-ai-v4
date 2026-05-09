@@ -161,6 +161,7 @@ interface AdminInviteSummary {
 const DEFAULT_ASSISTANT_PROMPT = "Sen yardımsever bir öğretmen asistanısın. Türkçe yanıt ver.";
 const ACTIVE_COURSE_STORAGE_KEY = "ustad-ai-active-course-id";
 const BOOTSTRAP_SESSION_KEY_PREFIX = "ustad-ai-bootstrap";
+const BOOTSTRAP_FLOW_VERSION = "v2";
 
 const QUESTION_AUTOMATION_DEFAULTS: Record<
   QuestionAutomationKind,
@@ -318,12 +319,17 @@ export default function UstadAI() {
   const [resetPasswordUser, setResetPasswordUser] = useState<AdminUserSummary | null>(null);
   const [adminPasswordForm, setAdminPasswordForm] = useState({ password: "", confirmPassword: "" });
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [passwordModalMode, setPasswordModalMode] = useState<"change" | "recovery">("change");
   const [passwordForm, setPasswordForm] = useState({
     currentPassword: "",
     newPassword: "",
     confirmPassword: "",
   });
   const [passwordSubmitting, setPasswordSubmitting] = useState(false);
+  const [resendConfirmationSubmitting, setResendConfirmationSubmitting] = useState(false);
+  const [forgotPasswordModalOpen, setForgotPasswordModalOpen] = useState(false);
+  const [forgotPasswordEmail, setForgotPasswordEmail] = useState("");
+  const [forgotPasswordSubmitting, setForgotPasswordSubmitting] = useState(false);
 
   const [courses, setCourses] = useState<Course[]>([]);
   const [activeCourseId, setActiveCourseId] = useState<number | null>(null);
@@ -449,6 +455,9 @@ export default function UstadAI() {
     setAdminModalOpen(false);
     setResetPasswordUser(null);
     setPasswordModalOpen(false);
+    setPasswordModalMode("change");
+    setForgotPasswordModalOpen(false);
+    setForgotPasswordEmail("");
     setAutomationLoading({});
     setAutomationConfigModal({
       isOpen: false,
@@ -518,6 +527,12 @@ export default function UstadAI() {
       setAuthLoading(false);
     }
   }, [fetchJsonWithTimeout]);
+
+  const showResendConfirmationAction =
+    authMode === "login" &&
+    authForm.email.trim().length > 0 &&
+    ((authNotice && authNotice.toLocaleLowerCase("tr-TR").includes("doğrula")) ||
+      (authError && authError.toLocaleLowerCase("tr-TR").includes("doğrula")));
 
   const handleAuthSubmit = useCallback(async () => {
     const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
@@ -597,6 +612,80 @@ export default function UstadAI() {
     }
   }, [authForm, authMode, resetWorkspaceState]);
 
+  const handleResendConfirmation = useCallback(async () => {
+    if (!authForm.email.trim()) {
+      setAuthError("Doğrulama e-postasını yeniden göndermek için e-posta adresini gir.");
+      return;
+    }
+
+    setResendConfirmationSubmitting(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      const response = await fetch("/api/auth/resend-confirmation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authForm.email }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Doğrulama e-postası yeniden gönderilemedi.");
+      }
+
+      setAuthNotice(
+        "Doğrulama bağlantısını yeniden gönderdik. E-postanı kontrol ettikten sonra giriş yapabilirsin.",
+      );
+    } catch (error) {
+      setAuthError(
+        error instanceof Error ? error.message : "Doğrulama e-postası yeniden gönderilemedi.",
+      );
+    } finally {
+      setResendConfirmationSubmitting(false);
+    }
+  }, [authForm.email]);
+
+  const handleForgotPasswordRequest = useCallback(async () => {
+    if (!forgotPasswordEmail.trim()) {
+      setAuthError("Şifre yenileme bağlantısı göndermek için e-posta adresini gir.");
+      return;
+    }
+
+    setForgotPasswordSubmitting(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      const response = await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: forgotPasswordEmail }),
+      });
+
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error || "Şifre yenileme e-postası gönderilemedi.");
+      }
+
+      setForgotPasswordModalOpen(false);
+      setAuthMode("login");
+      setAuthForm((prev) => ({
+        ...prev,
+        email: forgotPasswordEmail.trim(),
+      }));
+      setAuthNotice(
+        "Bu e-posta adresiyle bir hesap varsa, şifre yenileme bağlantısı gönderildi. Gelen kutunu kontrol edebilirsin.",
+      );
+    } catch (error) {
+      setAuthError(
+        error instanceof Error ? error.message : "Şifre yenileme e-postası gönderilemedi.",
+      );
+    } finally {
+      setForgotPasswordSubmitting(false);
+    }
+  }, [forgotPasswordEmail]);
+
   const handleLogout = useCallback(async () => {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
@@ -608,6 +697,7 @@ export default function UstadAI() {
     setSessionUser(null);
     setAuthMode("login");
     setAuthNotice("");
+    setPasswordModalMode("change");
     setAuthForm({
       name: "",
       email: "",
@@ -794,18 +884,29 @@ export default function UstadAI() {
       return;
     }
 
+    if (passwordModalMode === "change" && !passwordForm.currentPassword) {
+      setAuthError("Mevcut şifreni girmelisin.");
+      return;
+    }
+
     setPasswordSubmitting(true);
     setAuthError("");
 
     try {
-      const response = await fetch("/api/auth/password", {
+      const response = await fetch(
+        passwordModalMode === "recovery"
+          ? "/api/auth/password/recovery"
+          : "/api/auth/password",
+        {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          currentPassword: passwordForm.currentPassword,
+          currentPassword:
+            passwordModalMode === "change" ? passwordForm.currentPassword : undefined,
           newPassword: passwordForm.newPassword,
         }),
-      });
+        },
+      );
 
       const payload = (await response.json().catch(() => ({}))) as { error?: string };
       if (!response.ok) {
@@ -814,13 +915,18 @@ export default function UstadAI() {
 
       setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
       setPasswordModalOpen(false);
-      alert("Şifren güncellendi.");
+      setPasswordModalMode("change");
+      alert(
+        passwordModalMode === "recovery"
+          ? "Şifren yenilendi. Yeni şifrenle hesabını kullanabilirsin."
+          : "Şifren güncellendi.",
+      );
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Şifre değiştirilemedi.");
     } finally {
       setPasswordSubmitting(false);
     }
-  }, [passwordForm]);
+  }, [passwordForm, passwordModalMode]);
 
   const syncLearningGoals = useCallback(
     async (courseId: number, weeksList: Week[]) => {
@@ -1287,7 +1393,15 @@ export default function UstadAI() {
       return;
     }
 
-    if (!sessionUser) {
+    if (authStatus === "recovery") {
+      setAuthMode("login");
+      setAuthError("");
+      setAuthNotice("Bağlantı doğrulandı. Şimdi yeni şifreni belirleyebilirsin.");
+      setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+      setPasswordModalMode("recovery");
+      setPasswordModalOpen(true);
+      setForgotPasswordModalOpen(false);
+    } else if (!sessionUser) {
       if (authStatus === "verified") {
         setAuthMode("login");
         setAuthError("");
@@ -1329,7 +1443,7 @@ export default function UstadAI() {
         setDataLoading(true);
         const bootstrapKey =
           typeof window !== "undefined"
-            ? `${BOOTSTRAP_SESSION_KEY_PREFIX}:${sessionUser.id}:v1`
+            ? `${BOOTSTRAP_SESSION_KEY_PREFIX}:${sessionUser.id}:${BOOTSTRAP_FLOW_VERSION}`
             : "";
         const hasBootstrapMarker =
           typeof window !== "undefined" &&
@@ -2450,6 +2564,248 @@ const handleFileUpload = async (
           </div>
         )}
 
+        {forgotPasswordModalOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.5)",
+              zIndex: 72,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 16,
+            }}
+          >
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 420,
+                background: "#fff",
+                borderRadius: 18,
+                boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "16px 20px",
+                  borderBottom: "1px solid #e5e7eb",
+                }}
+              >
+                <h3 style={{ margin: 0, fontSize: 16 }}>Şifreyi Yenile</h3>
+                <button
+                  onClick={() => {
+                    setForgotPasswordModalOpen(false);
+                    setAuthError("");
+                  }}
+                  style={{ background: "none", border: "none", cursor: "pointer" }}
+                >
+                  <X size={18} color="#6b7280" />
+                </button>
+              </div>
+              <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+                <p style={{ margin: 0, color: "#6b7280", fontSize: 13, lineHeight: 1.6 }}>
+                  Hesabına bağlı e-posta adresini gir. Eğer bu e-posta ile bir hesap varsa,
+                  şifreni yenilemen için sana bir bağlantı göndereceğiz.
+                </p>
+                <input
+                  type="email"
+                  value={forgotPasswordEmail}
+                  onChange={(event) => setForgotPasswordEmail(event.target.value)}
+                  placeholder="E-posta"
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: 12,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void handleForgotPasswordRequest();
+                    }
+                  }}
+                />
+                {authError && (
+                  <div
+                    style={{
+                      background: "#fef2f2",
+                      color: "#b91c1c",
+                      border: "1px solid #fecaca",
+                      borderRadius: 12,
+                      padding: "10px 12px",
+                      fontSize: 13,
+                    }}
+                  >
+                    {authError}
+                  </div>
+                )}
+                <button
+                  onClick={() => void handleForgotPasswordRequest()}
+                  disabled={forgotPasswordSubmitting}
+                  style={{
+                    width: "100%",
+                    padding: "12px 0",
+                    background: forgotPasswordSubmitting ? "#93c5fd" : "#2563eb",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 12,
+                    fontWeight: 700,
+                    cursor: forgotPasswordSubmitting ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {forgotPasswordSubmitting ? "Gönderiliyor..." : "Şifre Yenileme E-postası Gönder"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {passwordModalOpen && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.5)",
+              zIndex: 72,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 16,
+            }}
+          >
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 420,
+                background: "#fff",
+                borderRadius: 18,
+                boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "16px 20px",
+                  borderBottom: "1px solid #e5e7eb",
+                }}
+              >
+                <h3 style={{ margin: 0, fontSize: 16 }}>
+                  {passwordModalMode === "recovery" ? "Yeni Şifre Belirle" : "Şifremi Değiştir"}
+                </h3>
+                <button
+                  onClick={() => {
+                    setPasswordModalOpen(false);
+                    setPasswordModalMode("change");
+                    setAuthError("");
+                    setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+                  }}
+                  style={{ background: "none", border: "none", cursor: "pointer" }}
+                >
+                  <X size={18} color="#6b7280" />
+                </button>
+              </div>
+              <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+                {passwordModalMode === "recovery" && (
+                  <p style={{ margin: 0, color: "#6b7280", fontSize: 13, lineHeight: 1.6 }}>
+                    Şifre yenileme bağlantısı doğrulandı. Devam etmek için yeni şifreni belirle.
+                  </p>
+                )}
+                {passwordModalMode === "change" && (
+                  <input
+                    type="password"
+                    value={passwordForm.currentPassword}
+                    onChange={(event) =>
+                      setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))
+                    }
+                    placeholder="Mevcut şifre"
+                    style={{
+                      width: "100%",
+                      padding: "12px 14px",
+                      border: "1px solid #d1d5db",
+                      borderRadius: 12,
+                      fontSize: 14,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                )}
+                <input
+                  type="password"
+                  value={passwordForm.newPassword}
+                  onChange={(event) =>
+                    setPasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))
+                  }
+                  placeholder="Yeni şifre"
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: 12,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+                <input
+                  type="password"
+                  value={passwordForm.confirmPassword}
+                  onChange={(event) =>
+                    setPasswordForm((prev) => ({ ...prev, confirmPassword: event.target.value }))
+                  }
+                  placeholder="Yeni şifre tekrar"
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: 12,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+                {authError && (
+                  <div
+                    style={{
+                      background: "#fef2f2",
+                      color: "#b91c1c",
+                      border: "1px solid #fecaca",
+                      borderRadius: 12,
+                      padding: "10px 12px",
+                      fontSize: 13,
+                    }}
+                  >
+                    {authError}
+                  </div>
+                )}
+                <button
+                  onClick={() => void handleChangePassword()}
+                  disabled={passwordSubmitting}
+                  style={{
+                    width: "100%",
+                    padding: "12px 0",
+                    background: passwordSubmitting ? "#93c5fd" : "#2563eb",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 12,
+                    fontWeight: 700,
+                    cursor: passwordSubmitting ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {passwordSubmitting
+                    ? "Güncelleniyor..."
+                    : passwordModalMode === "recovery"
+                      ? "Yeni Şifreyi Kaydet"
+                      : "Şifreyi Güncelle"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div
           style={{
             width: "100%",
@@ -2623,6 +2979,36 @@ const handleFileUpload = async (
                   }
                 }}
               />
+              {authMode === "login" && (
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "flex-end",
+                    marginTop: -4,
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthError("");
+                      setAuthNotice("");
+                      setForgotPasswordEmail(authForm.email.trim());
+                      setForgotPasswordModalOpen(true);
+                    }}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      color: "#2563eb",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Şifremi unuttum
+                  </button>
+                </div>
+              )}
               {authMode === "register" && (
                 <>
                   <div
@@ -2822,6 +3208,27 @@ const handleFileUpload = async (
                     ? "Hesap Oluştur"
                     : "Giriş Yap"}
               </button>
+              {authMode === "login" && showResendConfirmationAction && (
+                <button
+                  type="button"
+                  onClick={() => void handleResendConfirmation()}
+                  disabled={resendConfirmationSubmitting}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    color: resendConfirmationSubmitting ? "#93c5fd" : "#2563eb",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: resendConfirmationSubmitting ? "not-allowed" : "pointer",
+                    alignSelf: "center",
+                  }}
+                >
+                  {resendConfirmationSubmitting
+                    ? "Doğrulama e-postası gönderiliyor..."
+                    : "Doğrulama e-postasını yeniden gönder"}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -3526,10 +3933,13 @@ const handleFileUpload = async (
                 borderBottom: "1px solid #e5e7eb",
               }}
             >
-              <h3 style={{ margin: 0, fontSize: 16 }}>Şifremi Değiştir</h3>
+              <h3 style={{ margin: 0, fontSize: 16 }}>
+                {passwordModalMode === "recovery" ? "Yeni Şifre Belirle" : "Şifremi Değiştir"}
+              </h3>
               <button
                 onClick={() => {
                   setPasswordModalOpen(false);
+                  setPasswordModalMode("change");
                   setAuthError("");
                   setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
                 }}
@@ -3539,22 +3949,29 @@ const handleFileUpload = async (
               </button>
             </div>
             <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
-              <input
-                type="password"
-                value={passwordForm.currentPassword}
-                onChange={(event) =>
-                  setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))
-                }
-                placeholder="Mevcut şifre"
-                style={{
-                  width: "100%",
-                  padding: "12px 14px",
-                  border: "1px solid #d1d5db",
-                  borderRadius: 12,
-                  fontSize: 14,
-                  boxSizing: "border-box",
-                }}
-              />
+              {passwordModalMode === "recovery" && (
+                <p style={{ margin: 0, color: "#6b7280", fontSize: 13, lineHeight: 1.6 }}>
+                  Şifre yenileme bağlantısı doğrulandı. Devam etmek için yeni şifreni belirle.
+                </p>
+              )}
+              {passwordModalMode === "change" && (
+                <input
+                  type="password"
+                  value={passwordForm.currentPassword}
+                  onChange={(event) =>
+                    setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))
+                  }
+                  placeholder="Mevcut şifre"
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: 12,
+                    fontSize: 14,
+                    boxSizing: "border-box",
+                  }}
+                />
+              )}
               <input
                 type="password"
                 value={passwordForm.newPassword}
@@ -3615,7 +4032,11 @@ const handleFileUpload = async (
                   cursor: passwordSubmitting ? "not-allowed" : "pointer",
                 }}
               >
-                {passwordSubmitting ? "Güncelleniyor..." : "Şifreyi Güncelle"}
+                {passwordSubmitting
+                  ? "Güncelleniyor..."
+                  : passwordModalMode === "recovery"
+                    ? "Yeni Şifreyi Kaydet"
+                    : "Şifreyi Güncelle"}
               </button>
             </div>
           </div>
@@ -5000,6 +5421,7 @@ const handleFileUpload = async (
               onClick={() => {
                 setAuthError("");
                 setPasswordForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+                setPasswordModalMode("change");
                 setPasswordModalOpen(true);
               }}
               style={{

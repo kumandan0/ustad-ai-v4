@@ -71,8 +71,71 @@ export class AuthError extends Error {
   }
 }
 
+function mapAuthEmailDispatchError(error: { message?: string; status?: number | string }) {
+  const rawMessage = error.message?.trim() || "E-posta işlemi sırasında bir hata oluştu.";
+  const normalizedMessage = rawMessage.toLocaleLowerCase("en-US");
+  const status =
+    typeof error.status === "number"
+      ? error.status
+      : Number.isFinite(Number(error.status))
+        ? Number(error.status)
+        : 400;
+
+  if (
+    status === 429 ||
+    normalizedMessage.includes("email rate limit") ||
+    normalizedMessage.includes("rate limit exceeded")
+  ) {
+    return new AuthError(
+      "Bu e-posta adresi için kısa süre içinde çok fazla işlem yapıldı. Lütfen birkaç dakika bekleyip tekrar dene ya da gelen kutundaki mevcut e-postayı kullan.",
+      429,
+    );
+  }
+
+  return new AuthError(rawMessage, status);
+}
+
+function mapSignupErrorToAuthError(error: { message?: string; status?: number | string }) {
+  const rawMessage = error.message?.trim() || "Kayıt sırasında bir hata oluştu.";
+  const normalizedMessage = rawMessage.toLocaleLowerCase("en-US");
+  const status =
+    typeof error.status === "number"
+      ? error.status
+      : Number.isFinite(Number(error.status))
+        ? Number(error.status)
+        : 400;
+
+  if (
+    status === 429 ||
+    normalizedMessage.includes("email rate limit") ||
+    normalizedMessage.includes("rate limit exceeded")
+  ) {
+    return new AuthError(
+      "Bu e-posta adresine kısa süre içinde çok fazla doğrulama e-postası gönderildi. Lütfen birkaç dakika bekleyip tekrar dene ya da gelen kutundaki mevcut doğrulama e-postasını kullan.",
+      429,
+    );
+  }
+
+  if (
+    normalizedMessage.includes("user already registered") ||
+    normalizedMessage.includes("already been registered")
+  ) {
+    return new AuthError(
+      "Bu e-posta adresiyle daha önce hesap oluşturulmuş görünüyor. E-posta doğrulamanı tamamladıysan giriş yapabilirsin; tamamlamadıysan mevcut doğrulama e-postanı kullan.",
+      409,
+    );
+  }
+
+  return new AuthError(rawMessage, status);
+}
+
 function normalizeEmail(email: string) {
   return email.trim().toLocaleLowerCase("en-US");
+}
+
+function getLegacyImportEmail() {
+  const value = process.env.LEGACY_IMPORT_EMAIL?.trim() ?? "";
+  return value ? normalizeEmail(value) : "";
 }
 
 function getRequestOrigin(request: NextRequest) {
@@ -154,14 +217,20 @@ async function buildAuthContext(request: NextRequest) {
 
 export async function bootstrapUserWorkspace(request: NextRequest) {
   const context = await requireUser(request);
+  const legacyImportEmail = getLegacyImportEmail();
+  const shouldMigrateLegacyWorkspace =
+    legacyImportEmail.length > 0 &&
+    normalizeEmail(context.user.email) === legacyImportEmail;
 
-  await maybeMigrateLegacyWorkspace({
-    supabase: context.supabase,
-    user: {
-      id: context.user.id,
-      email: context.user.email,
-    },
-  });
+  if (shouldMigrateLegacyWorkspace) {
+    await maybeMigrateLegacyWorkspace({
+      supabase: context.supabase,
+      user: {
+        id: context.user.id,
+        email: context.user.email,
+      },
+    });
+  }
 
   await maybeMigrateLegacyMaterialsToSupabase({
     supabase: context.supabase,
@@ -272,7 +341,7 @@ export async function registerUser(
   });
 
   if (signupResult.error) {
-    throw new AuthError(signupResult.error.message, 400);
+    throw mapSignupErrorToAuthError(signupResult.error);
   }
 
   if (!signupResult.data.session) {
@@ -338,6 +407,56 @@ export async function logoutCurrentUser(request: NextRequest) {
   }
 
   return { applyCookies };
+}
+
+export async function resendConfirmationEmail(
+  request: NextRequest,
+  input: { email: string },
+) {
+  const email = normalizeEmail(input.email);
+
+  if (!email || !email.includes("@")) {
+    throw new AuthError("Geçerli bir e-posta girin.", 400);
+  }
+
+  const supabase = await createVerifiedPublicClient();
+  const emailRedirectTo = new URL("/auth/callback", getRequestOrigin(request)).toString();
+  const { error } = await supabase.auth.resend({
+    type: "signup",
+    email,
+    options: {
+      emailRedirectTo,
+    },
+  });
+
+  if (error) {
+    throw mapAuthEmailDispatchError(error);
+  }
+
+  return { email };
+}
+
+export async function requestPasswordRecovery(
+  request: NextRequest,
+  input: { email: string },
+) {
+  const email = normalizeEmail(input.email);
+
+  if (!email || !email.includes("@")) {
+    throw new AuthError("Geçerli bir e-posta girin.", 400);
+  }
+
+  const supabase = await createVerifiedPublicClient();
+  const redirectTo = new URL("/auth/callback", getRequestOrigin(request)).toString();
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo,
+  });
+
+  if (error) {
+    throw mapAuthEmailDispatchError(error);
+  }
+
+  return { email };
 }
 
 export async function listUsersForAdmin(request: NextRequest) {
@@ -492,6 +611,21 @@ export async function changeOwnPassword(
   const { error } = await context.supabase.auth.updateUser({ password: newPassword });
   if (error) {
     throw new AuthError(error.message || "Şifre değiştirilemedi.", 500);
+  }
+
+  return { applyCookies: context.applyCookies };
+}
+
+export async function completePasswordRecovery(
+  request: NextRequest,
+  newPassword: string,
+) {
+  assertStrongPassword(newPassword);
+  const context = await requireUser(request);
+  const { error } = await context.supabase.auth.updateUser({ password: newPassword });
+
+  if (error) {
+    throw new AuthError(error.message || "Şifre yenilenemedi.", 500);
   }
 
   return { applyCookies: context.applyCookies };

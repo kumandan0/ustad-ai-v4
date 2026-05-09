@@ -25,6 +25,7 @@ function buildRedirectUrl(
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
+  const type = request.nextUrl.searchParams.get("type");
   const { supabase, applyCookies } = createRouteHandlerSupabaseClient(request);
 
   if (!code) {
@@ -52,7 +53,7 @@ export async function GET(request: NextRequest) {
 
   const response = NextResponse.redirect(
     buildRedirectUrl(request, {
-      auth: "verified",
+      auth: type === "recovery" ? "recovery" : "verified",
     }),
   );
   return applyCookies(response);
