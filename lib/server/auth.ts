@@ -74,6 +74,17 @@ function normalizeEmail(email: string) {
   return email.trim().toLocaleLowerCase("en-US");
 }
 
+function getRequestOrigin(request: NextRequest) {
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+
+  if (forwardedHost) {
+    return `${forwardedProto ?? "https"}://${forwardedHost}`;
+  }
+
+  return request.nextUrl.origin;
+}
+
 function assertStrongPassword(password: string) {
   if (password.length < 6) {
     throw new AuthError("Şifre en az 6 karakter olmalı.", 400);
@@ -228,10 +239,12 @@ export async function registerUser(
   assertStrongPassword(password);
 
   const { supabase, applyCookies } = createRouteHandlerSupabaseClient(request);
+  const emailRedirectTo = new URL("/auth/callback", getRequestOrigin(request)).toString();
   const signupResult = await supabase.auth.signUp({
     email,
     password,
     options: {
+      emailRedirectTo,
       data: {
         full_name: fullName,
         accepted_kvkk: true,
@@ -246,18 +259,16 @@ export async function registerUser(
     throw new AuthError(signupResult.error.message, 400);
   }
 
-  let sessionUser = signupResult.data.user;
-
   if (!signupResult.data.session) {
-    const signInResult = await supabase.auth.signInWithPassword({ email, password });
-    if (signInResult.error || !signInResult.data.user) {
-      throw new AuthError(
-        "Kayıt oluşturuldu ancak oturum açılamadı. Supabase Auth ayarlarında e-posta doğrulaması açık olabilir.",
-        400,
-      );
-    }
-    sessionUser = signInResult.data.user;
+    return {
+      user: null,
+      requiresEmailConfirmation: true,
+      email,
+      applyCookies,
+    };
   }
+
+  const sessionUser = signupResult.data.user;
 
   if (!sessionUser) {
     throw new AuthError("Kullanıcı hesabı oluşturulamadı.", 500);
@@ -267,6 +278,7 @@ export async function registerUser(
 
   return {
     user: buildSessionUser(profile, sessionUser),
+    requiresEmailConfirmation: false,
     applyCookies,
   };
 }
@@ -285,6 +297,12 @@ export async function loginUser(
   });
 
   if (error || !data.user) {
+    if (error?.message?.toLocaleLowerCase("en-US").includes("email not confirmed")) {
+      throw new AuthError(
+        "E-posta adresini doğruladıktan sonra giriş yapabilirsin. Gelen kutundaki doğrulama bağlantısını kontrol et.",
+        401,
+      );
+    }
     throw new AuthError("E-posta veya şifre hatalı.", 401);
   }
 

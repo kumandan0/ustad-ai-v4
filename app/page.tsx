@@ -8,6 +8,7 @@ import {
   type ChangeEvent,
   type ElementType,
 } from "react";
+import { useRouter } from "next/navigation";
 import {
   Send,
   Plus,
@@ -101,6 +102,7 @@ interface Material {
   mime_type?: string | null;
   storage_provider?: "local" | "supabase" | "google_drive" | "koofr" | null;
   storage_file_id?: string | null;
+  preview_url?: string | null;
 }
 
 type MaterialFileType = Material["file_type"];
@@ -282,6 +284,7 @@ const getAssessmentVisual = (progress: number, totalQuestions: number, available
 export default function UstadAI() {
   const supabaseRef = useRef<any>(null);
   const courseLoadRequestRef = useRef(0);
+  const router = useRouter();
   if (!supabaseRef.current) {
     supabaseRef.current = createClient();
   }
@@ -292,6 +295,7 @@ export default function UstadAI() {
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [authForm, setAuthForm] = useState({
     name: "",
     email: "",
@@ -373,7 +377,8 @@ export default function UstadAI() {
     url: string;
     name: string;
     weekIndex: number;
-  }>({ isOpen: false, type: null, url: "", name: "", weekIndex: 0 });
+    loading: boolean;
+  }>({ isOpen: false, type: null, url: "", name: "", weekIndex: 0, loading: false });
   const [playMode, setPlayMode] = useState<{
     weekIndex: number;
     cards: Flashcard[];
@@ -414,7 +419,14 @@ export default function UstadAI() {
     setInput("");
     setExamView(null);
     setExpandedExamWeek(null);
-    setPreviewModal({ isOpen: false, type: null, url: "", name: "", weekIndex: 0 });
+    setPreviewModal({
+      isOpen: false,
+      type: null,
+      url: "",
+      name: "",
+      weekIndex: 0,
+      loading: false,
+    });
     setPlayMode(null);
     setTestMode(null);
     setCourseDropOpen(false);
@@ -472,6 +484,7 @@ export default function UstadAI() {
     const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
     setAuthSubmitting(true);
     setAuthError("");
+    setAuthNotice("");
 
     if (authMode === "register" && (!authForm.acceptedKvkk || !authForm.acceptedTerms)) {
       setAuthError("Devam etmek için zorunlu onay kutularını işaretlemelisin.");
@@ -490,12 +503,37 @@ export default function UstadAI() {
       });
 
       const payload = (await response.json().catch(() => ({}))) as {
-        user?: SessionUser;
+        user?: SessionUser | null;
+        requiresEmailConfirmation?: boolean;
+        email?: string;
         error?: string;
       };
 
-      if (!response.ok || !payload.user) {
+      if (!response.ok) {
         setAuthError(payload.error || "İşlem tamamlanamadı.");
+        return;
+      }
+
+      if (authMode === "register" && payload.requiresEmailConfirmation) {
+        setAuthMode("login");
+        setAuthForm((prev) => ({
+          ...prev,
+          name: "",
+          email: payload.email || prev.email,
+          password: "",
+          inviteCode: "",
+          acceptedKvkk: false,
+          acceptedTerms: false,
+          marketingConsent: false,
+        }));
+        setAuthNotice(
+          "Hesabın oluşturuldu. E-postana gönderdiğimiz doğrulama bağlantısına tıkladıktan sonra giriş yapabilirsin.",
+        );
+        return;
+      }
+
+      if (!payload.user) {
+        setAuthError("İşlem tamamlanamadı.");
         return;
       }
 
@@ -530,6 +568,7 @@ export default function UstadAI() {
     resetWorkspaceState();
     setSessionUser(null);
     setAuthMode("login");
+    setAuthNotice("");
     setAuthForm({
       name: "",
       email: "",
@@ -902,6 +941,78 @@ export default function UstadAI() {
     return false;
   }, [supabase]);
 
+  const resolveMaterialPreviewUrl = useCallback(async (material: Material) => {
+    const resolvedUrl = await resolveStoredFileUrl(String(material.file_url ?? ""));
+    return resolvedUrl || material.preview_url || String(material.file_url ?? "");
+  }, []);
+
+  const prefetchMaterialPreview = useCallback(
+    async (material: Material, weekIndex: number) => {
+      const previewUrl = await resolveMaterialPreviewUrl(material);
+
+      setMaterials((prev) => {
+        const currentWeek = prev[weekIndex] ?? {};
+        const currentMaterial = currentWeek[material.file_type] ?? material;
+
+        return {
+          ...prev,
+          [weekIndex]: {
+            ...currentWeek,
+            [material.file_type]: {
+              ...currentMaterial,
+              preview_url: previewUrl,
+            },
+          },
+        };
+      });
+
+      return previewUrl;
+    },
+    [resolveMaterialPreviewUrl],
+  );
+
+  const openMaterialPreview = useCallback(
+    async (material: Material) => {
+      setPreviewModal({
+        isOpen: true,
+        type: material.file_type,
+        url: "",
+        name: material.file_name,
+        weekIndex: material.week_index,
+        loading: true,
+      });
+
+      try {
+        const previewUrl = await prefetchMaterialPreview(material, material.week_index);
+        setPreviewModal((prev) =>
+          prev.isOpen &&
+          prev.weekIndex === material.week_index &&
+          prev.type === material.file_type
+            ? {
+                ...prev,
+                url: previewUrl,
+                loading: false,
+              }
+            : prev,
+        );
+      } catch (error) {
+        console.error(error);
+        setPreviewModal((prev) =>
+          prev.isOpen &&
+          prev.weekIndex === material.week_index &&
+          prev.type === material.file_type
+            ? {
+                ...prev,
+                url: material.preview_url || String(material.file_url ?? ""),
+                loading: false,
+              }
+            : prev,
+        );
+      }
+    },
+    [prefetchMaterialPreview],
+  );
+
   const loadCourseData = useCallback(
     async (courseId: number) => {
       const requestId = courseLoadRequestRef.current + 1;
@@ -1029,26 +1140,56 @@ export default function UstadAI() {
         }
 
         if (materialsData) {
-          const resolvedMaterials = await Promise.all(
-            materialsData.map(async (material) => ({
-              ...(material as Material),
-              file_url: await resolveStoredFileUrl(String(material.file_url ?? "")),
-            })),
-          );
-
-          if (isStale()) {
-            return;
-          }
-
           const grouped: Record<number, WeekMaterials> = {};
-          resolvedMaterials.forEach((material) => {
+          (materialsData as Material[]).forEach((material) => {
             const weekIndex = Number(material.week_index);
             if (!grouped[weekIndex]) {
               grouped[weekIndex] = {};
             }
-            grouped[weekIndex][material.file_type as MaterialFileType] = material;
+            grouped[weekIndex][material.file_type as MaterialFileType] = {
+              ...(material as Material),
+              preview_url: null,
+            };
           });
           setMaterials(grouped);
+
+          void Promise.all(
+            (materialsData as Material[]).map(async (material) => ({
+              material,
+              previewUrl: await resolveMaterialPreviewUrl(material),
+            })),
+          )
+            .then((resolvedMaterials) => {
+              if (isStale()) {
+                return;
+              }
+
+              setMaterials((prev) => {
+                const next = { ...prev };
+
+                resolvedMaterials.forEach(({ material, previewUrl }) => {
+                  const weekIndex = Number(material.week_index);
+                  const currentWeek = next[weekIndex] ?? {};
+                  const currentMaterial =
+                    currentWeek[material.file_type as MaterialFileType] ?? material;
+
+                  next[weekIndex] = {
+                    ...currentWeek,
+                    [material.file_type]: {
+                      ...currentMaterial,
+                      preview_url: previewUrl,
+                    },
+                  };
+                });
+
+                return next;
+              });
+            })
+            .catch((error) => {
+              if (!isStale()) {
+                console.error(error);
+              }
+            });
         } else {
           setMaterials({});
         }
@@ -1071,7 +1212,7 @@ export default function UstadAI() {
         }
       }
     },
-    [courses, supabase, syncLearningGoals],
+    [courses, resolveMaterialPreviewUrl, supabase, syncLearningGoals],
   );
 
   useEffect(() => {
@@ -1089,6 +1230,39 @@ export default function UstadAI() {
       cancelled = true;
     };
   }, [fetchSession]);
+
+  useEffect(() => {
+    if (authLoading || typeof window === "undefined") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const authStatus = url.searchParams.get("auth");
+    const message = url.searchParams.get("message");
+
+    if (!authStatus && !message) {
+      return;
+    }
+
+    if (!sessionUser) {
+      if (authStatus === "verified") {
+        setAuthMode("login");
+        setAuthError("");
+        setAuthNotice("E-posta adresin doğrulandı. Şimdi giriş yapabilirsin.");
+      } else if (authStatus === "error") {
+        setAuthNotice("");
+        setAuthMode("login");
+        setAuthError(
+          message ||
+            "E-posta doğrulaması tamamlanamadı. Lütfen bağlantıyı yeniden deneyin.",
+        );
+      }
+    }
+
+    url.searchParams.delete("auth");
+    url.searchParams.delete("message");
+    router.replace(`${url.pathname}${url.search}`, { scroll: false });
+  }, [authLoading, router, sessionUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1176,7 +1350,14 @@ export default function UstadAI() {
       setMessages([]);
       setExamView(null);
       setExpandedExamWeek(null);
-      setPreviewModal({ isOpen: false, type: null, url: "", name: "", weekIndex: 0 });
+      setPreviewModal({
+        isOpen: false,
+        type: null,
+        url: "",
+        name: "",
+        weekIndex: 0,
+        loading: false,
+      });
       setPlayMode(null);
       setTestMode(null);
       void loadCourseData(activeCourseId);
@@ -1604,14 +1785,20 @@ const handleFileUpload = async (
         await supabase.from("materials").delete().eq("id", existingMaterial.id);
       }
 
-      const finalUrl = await resolveStoredFileUrl(String(data.file_url ?? ""));
+      const nextMaterial = {
+        ...(data as Material),
+        preview_url: null,
+      } as Material;
+
       setMaterials((prev) => ({
         ...prev,
         [weekIndex]: {
           ...prev[weekIndex],
-          [fileType]: { ...(data as Material), file_url: finalUrl || String(data.file_url ?? "") },
+          [fileType]: nextMaterial,
         },
       }));
+
+      void prefetchMaterialPreview(nextMaterial, weekIndex);
     } catch (error) {
       console.error(error);
       alert("Dosya yüklenemedi. Lütfen daha küçük bir dosya deneyin veya sayfayı yenileyip tekrar deneyin.");
@@ -1875,17 +2062,20 @@ const handleFileUpload = async (
             throw new Error("Üretilen materyal alınamadı.");
           }
 
-          const resolvedUrl = await resolveStoredFileUrl(String(material.file_url ?? ""));
+          const nextMaterial = {
+            ...material,
+            preview_url: null,
+          } as Material;
+
           setMaterials((prev) => ({
             ...prev,
             [weekIndex]: {
               ...prev[weekIndex],
-              [material.file_type]: {
-                ...material,
-                file_url: resolvedUrl || String(material.file_url ?? ""),
-              },
+              [material.file_type]: nextMaterial,
             },
           }));
+
+          void prefetchMaterialPreview(nextMaterial, weekIndex);
 
           const label =
             payload.data.kind === "audio_summary" ? "sesli özet" : "infografik";
@@ -1965,7 +2155,7 @@ const handleFileUpload = async (
         });
       }
     },
-    [activeCourseId, buildAutomationKey],
+    [activeCourseId, buildAutomationKey, prefetchMaterialPreview],
   );
 
   const sendMessage = async () => {
@@ -2261,6 +2451,7 @@ const handleFileUpload = async (
                   onClick={() => {
                     setAuthMode(mode);
                     setAuthError("");
+                    setAuthNotice("");
                   }}
                   style={{
                     flex: 1,
@@ -2481,6 +2672,20 @@ const handleFileUpload = async (
                     </div>
                   </div>
                 </>
+              )}
+              {authNotice && (
+                <div
+                  style={{
+                    background: "#ecfdf5",
+                    color: "#166534",
+                    border: "1px solid #bbf7d0",
+                    borderRadius: 12,
+                    padding: "10px 12px",
+                    fontSize: 13,
+                  }}
+                >
+                  {authNotice}
+                </div>
               )}
               {authError && (
                 <div
@@ -3815,7 +4020,14 @@ const handleFileUpload = async (
               </div>
               <button
                 onClick={() =>
-                  setPreviewModal({ isOpen: false, type: null, url: "", name: "", weekIndex: 0 })
+                  setPreviewModal({
+                    isOpen: false,
+                    type: null,
+                    url: "",
+                    name: "",
+                    weekIndex: 0,
+                    loading: false,
+                  })
                 }
                 style={{ background: "none", border: "none", cursor: "pointer" }}
               >
@@ -3823,7 +4035,31 @@ const handleFileUpload = async (
               </button>
             </div>
             <div style={{ flex: 1, padding: 24, overflow: "auto" }}>
-              {previewModal.type === "audio" ? (
+              {previewModal.loading ? (
+                <div
+                  style={{
+                    minHeight: "65vh",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 14,
+                    color: "#6b7280",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 44,
+                      height: 44,
+                      borderRadius: "50%",
+                      border: "4px solid #e5e7eb",
+                      borderTopColor: "#2563eb",
+                      animation: "spin 1s linear infinite",
+                    }}
+                  />
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>Materyal hazırlanıyor...</div>
+                </div>
+              ) : previewModal.type === "audio" ? (
                 <div
                   style={{
                     display: "flex",
@@ -3846,7 +4082,14 @@ const handleFileUpload = async (
                   >
                     <Headphones size={48} color="#2563eb" />
                   </div>
-                  <audio controls src={previewModal.url} autoPlay style={{ width: "100%", maxWidth: 400 }} />
+                  <audio
+                    key={previewModal.url}
+                    controls
+                    src={previewModal.url}
+                    autoPlay
+                    preload="metadata"
+                    style={{ width: "100%", maxWidth: 400 }}
+                  />
                 </div>
               ) : previewModal.type === "infographic" ? (
                 <div
@@ -4666,15 +4909,7 @@ const handleFileUpload = async (
                         {materials[index]?.audio ? (
                           <div style={{ position: "relative" }}>
                             <button
-                              onClick={() =>
-                                setPreviewModal({
-                                  isOpen: true,
-                                  type: "audio",
-                                  url: materials[index].audio?.file_url ?? "",
-                                  name: materials[index].audio?.file_name ?? "",
-                                  weekIndex: index,
-                                })
-                              }
+                              onClick={() => void openMaterialPreview(materials[index].audio!)}
                               style={{
                                 display: "flex",
                                 flexDirection: "column",
@@ -4753,15 +4988,7 @@ const handleFileUpload = async (
                         {materials[index]?.pdf ? (
                           <div style={{ position: "relative" }}>
                             <button
-                              onClick={() =>
-                                setPreviewModal({
-                                  isOpen: true,
-                                  type: "pdf",
-                                  url: materials[index].pdf?.file_url ?? "",
-                                  name: materials[index].pdf?.file_name ?? "",
-                                  weekIndex: index,
-                                })
-                              }
+                              onClick={() => void openMaterialPreview(materials[index].pdf!)}
                               style={{
                                 display: "flex",
                                 flexDirection: "column",
@@ -4840,15 +5067,7 @@ const handleFileUpload = async (
                         {materials[index]?.infographic ? (
                           <div style={{ position: "relative" }}>
                             <button
-                              onClick={() =>
-                                setPreviewModal({
-                                  isOpen: true,
-                                  type: "infographic",
-                                  url: materials[index].infographic?.file_url ?? "",
-                                  name: materials[index].infographic?.file_name ?? "",
-                                  weekIndex: index,
-                                })
-                              }
+                              onClick={() => void openMaterialPreview(materials[index].infographic!)}
                               style={{
                                 display: "flex",
                                 flexDirection: "column",

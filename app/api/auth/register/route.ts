@@ -26,7 +26,11 @@ export async function POST(request: NextRequest) {
       marketingConsent: Boolean(body.marketingConsent),
     });
 
-    const response = NextResponse.json({ user: session.user });
+    const response = NextResponse.json({
+      user: session.user,
+      requiresEmailConfirmation: Boolean(session.requiresEmailConfirmation),
+      email: body.email ?? "",
+    });
     return session.applyCookies(response);
   } catch (error) {
     if (error instanceof AuthError) {
