@@ -411,7 +411,6 @@ export default function UstadAI() {
     weekIndex: number;
     loading: boolean;
   }>({ isOpen: false, type: null, url: "", name: "", weekIndex: 0, loading: false });
-  const [storageSyncingWeeks, setStorageSyncingWeeks] = useState<Record<number, boolean>>({});
   const [playMode, setPlayMode] = useState<{
     weekIndex: number;
     cards: Flashcard[];
@@ -2080,70 +2079,6 @@ const handleFileUpload = async (
     });
   };
 
-  const syncWeekMaterialsFromSupabase = async (weekIndex: number) => {
-    if (!activeCourseId) {
-      return;
-    }
-
-    setStorageSyncingWeeks((prev) => ({ ...prev, [weekIndex]: true }));
-
-    try {
-      const response = await fetch("/api/files/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          courseId: activeCourseId,
-          weekIndex,
-        }),
-      });
-
-      const payload = (await response.json().catch(() => ({}))) as {
-        data?: Material[];
-        error?: string;
-      };
-
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.error || "Supabase Storage içeriği bağlanamadı.");
-      }
-
-      const imported = payload.data.map((material) => ({
-        ...material,
-        preview_url: null,
-      })) as Material[];
-
-      setMaterials((prev) => {
-        const nextWeek = { ...(prev[weekIndex] ?? {}) };
-        imported.forEach((material) => {
-          nextWeek[material.file_type] = material;
-        });
-
-        return {
-          ...prev,
-          [weekIndex]: nextWeek,
-        };
-      });
-
-      void Promise.all(
-        imported.map((material) => prefetchMaterialPreview(material, weekIndex)),
-      );
-
-      alert(
-        imported.length === 1
-          ? "Supabase'den 1 materyal bağlandı."
-          : `Supabase'den ${imported.length} materyal bağlandı.`,
-      );
-    } catch (error) {
-      console.error(error);
-      alert(
-        error instanceof Error
-          ? `Supabase senkronizasyonu başarısız oldu: ${error.message}`
-          : "Supabase senkronizasyonu başarısız oldu.",
-      );
-    } finally {
-      setStorageSyncingWeeks((prev) => ({ ...prev, [weekIndex]: false }));
-    }
-  };
-
   const handleFlashcardCSV = async (weekIndex: number, event: ChangeEvent<HTMLInputElement>) => {
     if (!activeCourseId) {
       return;
@@ -3065,6 +3000,56 @@ const handleFileUpload = async (
                 ? "Derslerini, materyallerini, testlerini ve çalışma ilerlemeni kendi kişisel alanında takip etmek için hesabını oluştur."
                 : "Kendi ders alanına ulaşmak için giriş yap."}
             </p>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                marginBottom: 20,
+                padding: "14px 16px",
+                borderRadius: 14,
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 4 }}>
+                  Ustad.ai Kullanım Kılavuzu
+                </div>
+                <div style={{ fontSize: 12, lineHeight: 1.6, color: "#64748b" }}>
+                  Platformu ilk kez kullanacaksan kısa kılavuzu açıp temel adımları inceleyebilirsin.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setLegalModal({
+                    isOpen: true,
+                    title: "Ustad.ai Kullanım Kılavuzu",
+                    url: "/manual/ustad-ai-interactive-manual.pdf",
+                  })
+                }
+                style={{
+                  flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "10px 14px",
+                  background: "#fff",
+                  color: "#2563eb",
+                  border: "1px solid #bfdbfe",
+                  borderRadius: 10,
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                <BookOpen size={15} />
+                Kılavuzu Aç
+              </button>
+            </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {authMode === "register" && (
@@ -5788,30 +5773,6 @@ const handleFileUpload = async (
                             </button>
                           </>
                         )}
-                      </div>
-                      <div style={{ marginTop: 10 }}>
-                        <button
-                          onClick={() => void syncWeekMaterialsFromSupabase(index)}
-                          disabled={storageSyncingWeeks[index]}
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            padding: "7px 12px",
-                            background: "#f8fafc",
-                            color: "#334155",
-                            border: "1px solid #cbd5e1",
-                            borderRadius: 8,
-                            cursor: storageSyncingWeeks[index] ? "wait" : "pointer",
-                            fontSize: 12,
-                            fontWeight: 600,
-                          }}
-                        >
-                          <Upload size={13} />
-                          {storageSyncingWeeks[index]
-                            ? "Supabase taranıyor..."
-                            : "Supabase'den Bağla"}
-                        </button>
                       </div>
                       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                         {materials[index]?.audio ? (
